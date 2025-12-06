@@ -1,0 +1,23 @@
+{
+    "$schema": "https://playground.wordpress.net/blueprint-schema.json",
+    "login": true,
+    "siteOptions": {
+        "blogname": "GP Translate with OpenAI"
+    },
+    "landingPage": "/wp-admin/options-general.php?page=gp-translate-with-openai",
+    "steps": [
+        {
+            "step": "defineWpConfigConsts",
+            "consts": {
+                "GP_URL_BASE": "/"
+            }
+        },
+        {
+            "step": "installPlugin",
+            "pluginData": {
+                "resource": "wordpress.org/plugins",
+                "slug": "glotpress"
+            }
+        }
+    ]
+}
