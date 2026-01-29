@@ -48,18 +48,19 @@ class Profile {
 			return;
 		}
 
-		$models = array(
-			'gpt-3.5-turbo',
-			'gpt-4',
-			'gpt-4-turbo',
-			'gpt-4o',
-			'gpt-4o-mini',
-		);
+		// Get available models from API.
+		$models = Api::get_available_models();
 
 		$api_key       = get_user_meta( $user->ID, 'gpoai_api_key', true );
+		$base_url      = get_user_meta( $user->ID, 'gpoai_base_url', true );
 		$model         = get_user_meta( $user->ID, 'gpoai_model', true );
 		$custom_prompt = get_user_meta( $user->ID, 'gpoai_custom_prompt', true );
 		$temperature   = get_user_meta( $user->ID, 'gpoai_temperature', true );
+
+		// Ensure current model is in the list.
+		if ( ! empty( $model ) && ! in_array( $model, $models, true ) ) {
+			array_unshift( $models, $model );
+		}
 		?>
 		<h3 id="gp-translate-with-openai"><?php esc_html_e( 'GP Translate with OpenAI', 'gp-translate-with-openai' ); ?></h3>
 		<input type="hidden" name="gpoai_nonce" value="<?php echo esc_attr( wp_create_nonce( 'gpoai_nonce' ) ); ?>">
@@ -71,6 +72,15 @@ class Profile {
 				<td>
 					<input type="text" id="gpoai_api_key" name="gpoai_api_key" value="<?php echo esc_attr( $api_key ); ?>">
 					<p class="description"><?php esc_html_e( 'Enter the OpenAI API Key.', 'gp-translate-with-openai' ); ?></p>
+				</td>
+			</tr>
+			<tr>
+				<th>
+					<label for="gpoai_base_url"><?php esc_html_e( 'OpenAI Base URL', 'gp-translate-with-openai' ); ?></label>
+				</th>
+				<td>
+					<input type="url" id="gpoai_base_url" name="gpoai_base_url" value="<?php echo esc_attr( $base_url ); ?>" placeholder="https://api.openai.com">
+					<p class="description"><?php esc_html_e( 'Leave empty to use the default. Enter a custom URL for alternative providers like Ollama.', 'gp-translate-with-openai' ); ?></p>
 				</td>
 			</tr>
 			<tr>
@@ -88,11 +98,16 @@ class Profile {
 			</tr>
 			<tr>
 				<th>
-					<label for="gpoai_custom_prompt"><?php esc_html_e( 'OpenAI Custom Prompt', 'gp-translate-with-openai' ); ?></label>
+					<label for="gpoai_custom_prompt"><?php esc_html_e( 'System Prompt', 'gp-translate-with-openai' ); ?></label>
 				</th>
 				<td>
-					<textarea name="gpoai_custom_prompt" id="gpoai_custom_prompt" class="large-text"><?php echo esc_attr( $custom_prompt ); ?></textarea>
-					<p class="description"><?php esc_html_e( 'Enter your custom prompt for OpenAI translation suggestions.', 'gp-translate-with-openai' ); ?></p>
+					<textarea name="gpoai_custom_prompt" id="gpoai_custom_prompt" class="large-text" rows="6"><?php echo esc_textarea( ! empty( $custom_prompt ) ? $custom_prompt : '' ); ?></textarea>
+					<p class="description">
+						<?php esc_html_e( 'Override the system prompt. Leave empty to use the global setting.', 'gp-translate-with-openai' ); ?>
+						<br>
+						<?php esc_html_e( 'Placeholders:', 'gp-translate-with-openai' ); ?>
+						<code>{SOURCE_LANGUAGE}</code>, <code>{TARGET_LANGUAGE}</code>, <code>{CONTEXT}</code>, <code>{GLOSSARY}</code>
+					</p>
 				</td>
 			</tr>
 			<tr>
@@ -132,11 +147,13 @@ class Profile {
 		}
 
 		$api_key       = isset( $_POST['gpoai_api_key'] ) ? sanitize_text_field( wp_unslash( $_POST['gpoai_api_key'] ) ) : '';
+		$base_url      = isset( $_POST['gpoai_base_url'] ) ? esc_url_raw( wp_unslash( $_POST['gpoai_base_url'] ) ) : '';
 		$model         = isset( $_POST['gpoai_model'] ) ? sanitize_text_field( wp_unslash( $_POST['gpoai_model'] ) ) : '';
 		$custom_prompt = isset( $_POST['gpoai_custom_prompt'] ) ? sanitize_text_field( wp_unslash( $_POST['gpoai_custom_prompt'] ) ) : '';
 		$temperature   = isset( $_POST['gpoai_temperature'] ) ? sanitize_text_field( wp_unslash( $_POST['gpoai_temperature'] ) ) : '';
 
 		update_user_meta( $user->ID, 'gpoai_api_key', $api_key );
+		update_user_meta( $user->ID, 'gpoai_base_url', $base_url );
 		update_user_meta( $user->ID, 'gpoai_model', $model );
 		update_user_meta( $user->ID, 'gpoai_custom_prompt', $custom_prompt );
 		update_user_meta( $user->ID, 'gpoai_temperature', $temperature );

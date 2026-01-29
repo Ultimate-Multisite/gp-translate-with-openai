@@ -1,0 +1,359 @@
+<?php
+/**
+ * Automation class file.
+ *
+ * @package Meloniq\GpOpenaiTranslate
+ */
+
+namespace Meloniq\GpOpenaiTranslate;
+
+use GP;
+
+/**
+ * Automation class for automated translation with Action Scheduler.
+ */
+class Automation {
+
+	/**
+	 * Hook name for batch translation.
+	 *
+	 * @var string
+	 */
+	const HOOK_TRANSLATE_BATCH = 'gpoai_translate_batch';
+
+	/**
+	 * Action Scheduler group name.
+	 *
+	 * @var string
+	 */
+	const GROUP_NAME = 'gpoai_automation';
+
+	/**
+	 * Batch size for translation.
+	 *
+	 * @var int
+	 */
+	const BATCH_SIZE = 10;
+
+	/**
+	 * Constructor.
+	 *
+	 * @return void
+	 */
+	public function __construct() {
+		$this->register_hooks();
+	}
+
+	/**
+	 * Register WordPress hooks.
+	 *
+	 * @return void
+	 */
+	public function register_hooks(): void {
+		// Hook into GlotPress originals import.
+		add_action( 'gp_originals_imported', array( $this, 'on_originals_imported' ), 10, 5 );
+
+		// Register Action Scheduler callback.
+		add_action( self::HOOK_TRANSLATE_BATCH, array( $this, 'process_translation_batch' ), 10, 3 );
+
+		// Admin hooks for manual trigger.
+		add_action( 'admin_post_gpoai_manual_translate', array( $this, 'handle_manual_translate' ) );
+	}
+
+	/**
+	 * Handle when new originals are imported into GlotPress.
+	 *
+	 * @param int   $project_id      The project ID.
+	 * @param int   $originals_added Number of originals added.
+	 * @param int   $originals_existing Number of existing originals.
+	 * @param int   $originals_fuzzied Number of fuzzied originals.
+	 * @param int   $originals_obsoleted Number of obsoleted originals.
+	 *
+	 * @return void
+	 */
+	public function on_originals_imported( $project_id, $originals_added, $originals_existing, $originals_fuzzied, $originals_obsoleted ): void {
+		// Check if automation is enabled.
+		if ( ! Config::get_automation_enabled() ) {
+			return;
+		}
+
+		// Check if we have new originals.
+		if ( $originals_added <= 0 ) {
+			return;
+		}
+
+		// Get target locales.
+		$target_locales = Config::get_automation_locales();
+		if ( empty( $target_locales ) ) {
+			return;
+		}
+
+		// Schedule translation for each locale.
+		foreach ( $target_locales as $locale ) {
+			$this->schedule_project_translation( $project_id, $locale );
+		}
+	}
+
+	/**
+	 * Schedule translation jobs for a project and locale.
+	 *
+	 * @param int    $project_id The project ID.
+	 * @param string $locale     The target locale.
+	 *
+	 * @return void
+	 */
+	public function schedule_project_translation( int $project_id, string $locale ): void {
+		// Check if Action Scheduler is available.
+		if ( ! function_exists( 'as_schedule_single_action' ) ) {
+			return;
+		}
+
+		// Find the translation set for this project and locale.
+		$translation_set = GP::$translation_set->by_project_id_slug_and_locale( $project_id, 'default', $locale );
+
+		if ( ! $translation_set ) {
+			// Try to create a translation set if it doesn't exist.
+			$translation_set = $this->create_translation_set( $project_id, $locale );
+			if ( ! $translation_set ) {
+				return;
+			}
+		}
+
+		// Get untranslated originals.
+		$untranslated_original_ids = $this->get_untranslated_original_ids( $project_id, $translation_set->id );
+
+		if ( empty( $untranslated_original_ids ) ) {
+			return;
+		}
+
+		// Split into batches.
+		$batches    = array_chunk( $untranslated_original_ids, self::BATCH_SIZE );
+		$delay      = 0;
+		$delay_step = 60; // 1 minute between batches.
+
+		foreach ( $batches as $batch ) {
+			as_schedule_single_action(
+				time() + $delay,
+				self::HOOK_TRANSLATE_BATCH,
+				array(
+					'project_id'         => $project_id,
+					'translation_set_id' => $translation_set->id,
+					'original_ids'       => $batch,
+				),
+				self::GROUP_NAME
+			);
+
+			$delay += $delay_step;
+		}
+	}
+
+	/**
+	 * Process a batch of translations.
+	 *
+	 * @param int   $project_id         The project ID.
+	 * @param int   $translation_set_id The translation set ID.
+	 * @param array $original_ids       Array of original IDs to translate.
+	 *
+	 * @return void
+	 */
+	public function process_translation_batch( int $project_id, int $translation_set_id, array $original_ids ): void {
+		// Get the translation set.
+		$translation_set = GP::$translation_set->get( $translation_set_id );
+		if ( ! $translation_set ) {
+			return;
+		}
+
+		$locale    = $translation_set->locale;
+		$translate = Translate::instance();
+
+		foreach ( $original_ids as $original_id ) {
+			// Get the original.
+			$original = GP::$original->get( $original_id );
+			if ( ! $original || $original->plural ) {
+				// Skip plurals for now.
+				continue;
+			}
+
+			// Check if already translated.
+			$existing = GP::$translation->find_one(
+				array(
+					'original_id'        => $original_id,
+					'translation_set_id' => $translation_set_id,
+					'status'             => array( 'current', 'waiting', 'fuzzy' ),
+				)
+			);
+
+			if ( $existing ) {
+				continue;
+			}
+
+			// Translate the string.
+			$translation = $translate->translate( $original->singular, $locale );
+
+			// Skip if translation failed or returned the original.
+			if ( empty( $translation ) || $translation === $original->singular ) {
+				continue;
+			}
+
+			// Check for warnings.
+			$warnings = GP::$translation_warnings->check( $original->singular, null, array( $translation ), $locale );
+
+			// Create the translation as fuzzy.
+			GP::$translation->create(
+				array(
+					'original_id'        => $original_id,
+					'translation_set_id' => $translation_set_id,
+					'translation_0'      => $translation,
+					'status'             => 'fuzzy',
+					'user_id'            => 0, // System user.
+					'warnings'           => $warnings,
+				)
+			);
+		}
+	}
+
+	/**
+	 * Get original IDs that don't have translations for a translation set.
+	 *
+	 * @param int $project_id         The project ID.
+	 * @param int $translation_set_id The translation set ID.
+	 *
+	 * @return array Array of original IDs.
+	 */
+	protected function get_untranslated_original_ids( int $project_id, int $translation_set_id ): array {
+		global $wpdb;
+
+		$originals_table    = GP::$original->table;
+		$translations_table = GP::$translation->table;
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$results = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT o.id FROM {$originals_table} o
+				LEFT JOIN {$translations_table} t ON o.id = t.original_id
+					AND t.translation_set_id = %d
+					AND t.status IN ('current', 'waiting', 'fuzzy')
+				WHERE o.project_id = %d
+					AND o.status = '+active'
+					AND o.plural IS NULL
+					AND t.id IS NULL
+				ORDER BY o.id ASC",
+				$translation_set_id,
+				$project_id
+			)
+		);
+
+		return array_map( 'intval', $results );
+	}
+
+	/**
+	 * Create a translation set for a project and locale.
+	 *
+	 * @param int    $project_id The project ID.
+	 * @param string $locale     The locale slug.
+	 *
+	 * @return object|null The translation set or null on failure.
+	 */
+	protected function create_translation_set( int $project_id, string $locale ) {
+		// Get the locale object.
+		$locale_obj = \GP_Locales::by_slug( $locale );
+		if ( ! $locale_obj ) {
+			return null;
+		}
+
+		// Create the translation set.
+		$translation_set = GP::$translation_set->create(
+			array(
+				'project_id' => $project_id,
+				'locale'     => $locale,
+				'slug'       => 'default',
+				'name'       => $locale_obj->english_name,
+			)
+		);
+
+		return $translation_set;
+	}
+
+	/**
+	 * Handle manual translation trigger from admin.
+	 *
+	 * @return void
+	 */
+	public function handle_manual_translate(): void {
+		// Verify nonce.
+		if ( ! isset( $_POST['gpoai_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['gpoai_nonce'] ) ), 'gpoai_manual_translate' ) ) {
+			wp_die( esc_html__( 'Security check failed.', 'gp-translate-with-openai' ) );
+		}
+
+		// Check capabilities.
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to perform this action.', 'gp-translate-with-openai' ) );
+		}
+
+		$project_id = isset( $_POST['project_id'] ) ? absint( $_POST['project_id'] ) : 0;
+		$locale     = isset( $_POST['locale'] ) ? sanitize_text_field( wp_unslash( $_POST['locale'] ) ) : '';
+
+		if ( ! $project_id || empty( $locale ) ) {
+			wp_safe_redirect( add_query_arg( 'gpoai_error', 'missing_params', wp_get_referer() ) );
+			exit;
+		}
+
+		// Schedule the translation.
+		$this->schedule_project_translation( $project_id, $locale );
+
+		wp_safe_redirect( add_query_arg( 'gpoai_success', 'scheduled', wp_get_referer() ) );
+		exit;
+	}
+
+	/**
+	 * Get all GlotPress projects.
+	 *
+	 * @return array Array of projects.
+	 */
+	public static function get_projects(): array {
+		if ( ! class_exists( 'GP' ) || ! isset( GP::$project ) ) {
+			return array();
+		}
+
+		$projects = GP::$project->all();
+
+		return $projects ? $projects : array();
+	}
+
+	/**
+	 * Get the count of pending automation jobs.
+	 *
+	 * @return int Number of pending jobs.
+	 */
+	public static function get_pending_jobs_count(): int {
+		if ( ! function_exists( 'as_get_scheduled_actions' ) ) {
+			return 0;
+		}
+
+		$pending = as_get_scheduled_actions(
+			array(
+				'hook'   => self::HOOK_TRANSLATE_BATCH,
+				'status' => \ActionScheduler_Store::STATUS_PENDING,
+				'group'  => self::GROUP_NAME,
+			),
+			'ids'
+		);
+
+		return count( $pending );
+	}
+
+	/**
+	 * Cancel all pending automation jobs.
+	 *
+	 * @return int Number of cancelled jobs.
+	 */
+	public static function cancel_all_pending_jobs(): int {
+		if ( ! function_exists( 'as_unschedule_all_actions' ) ) {
+			return 0;
+		}
+
+		$cancelled = as_unschedule_all_actions( self::HOOK_TRANSLATE_BATCH, array(), self::GROUP_NAME );
+
+		return $cancelled;
+	}
+}

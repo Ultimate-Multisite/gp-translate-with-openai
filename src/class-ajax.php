@@ -19,6 +19,7 @@ class Ajax {
 	 */
 	public function __construct() {
 		add_action( 'wp_ajax_gpoai_translate', array( $this, 'translate' ), 10 );
+		add_action( 'wp_ajax_gpoai_refresh_models', array( $this, 'refresh_models' ), 10 );
 	}
 
 	/**
@@ -100,5 +101,50 @@ class Ajax {
 		}
 
 		wp_send_json( $response );
+	}
+
+	/**
+	 * Refresh models from the API.
+	 *
+	 * @return void
+	 */
+	public function refresh_models(): void {
+		// Check nonce.
+		if ( ! isset( $_POST['nonce'] ) ) {
+			wp_send_json_error( array( 'message' => __( 'Missing nonce.', 'gp-translate-with-openai' ) ) );
+		}
+
+		$nonce = sanitize_text_field( wp_unslash( $_POST['nonce'] ) );
+		if ( ! wp_verify_nonce( $nonce, 'gpoai_refresh_models' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Invalid nonce.', 'gp-translate-with-openai' ) ) );
+		}
+
+		// Check capabilities.
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'gp-translate-with-openai' ) ) );
+		}
+
+		// Clear cache and fetch fresh models.
+		Api::clear_models_cache();
+		$models = Api::get_available_models( true );
+
+		if ( empty( $models ) ) {
+			wp_send_json_error(
+				array(
+					'message' => __( 'Could not fetch models. Check your API key and Base URL settings.', 'gp-translate-with-openai' ),
+				)
+			);
+		}
+
+		wp_send_json_success(
+			array(
+				'models'  => $models,
+				'message' => sprintf(
+					/* translators: %d: number of models */
+					__( 'Found %d models.', 'gp-translate-with-openai' ),
+					count( $models )
+				),
+			)
+		);
 	}
 }

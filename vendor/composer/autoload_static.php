@@ -7,14 +7,14 @@ namespace Composer\Autoload;
 class ComposerStaticInitd82f6199266ba26d95b7080b5779066b
 {
     public static $prefixLengthsPsr4 = array (
-        'O' => 
+        'O' =>
         array (
             'Orhanerday\\OpenAi\\' => 18,
         ),
     );
 
     public static $prefixDirsPsr4 = array (
-        'Orhanerday\\OpenAi\\' => 
+        'Orhanerday\\OpenAi\\' =>
         array (
             0 => __DIR__ . '/..' . '/orhanerday/open-ai/src',
         ),
