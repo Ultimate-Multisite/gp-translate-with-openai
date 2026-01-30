@@ -106,7 +106,7 @@ class Profile {
 						<?php esc_html_e( 'Override the system prompt. Leave empty to use the global setting.', 'gp-translate-with-openai' ); ?>
 						<br>
 						<?php esc_html_e( 'Placeholders:', 'gp-translate-with-openai' ); ?>
-						<code>{SOURCE_LANGUAGE}</code>, <code>{TARGET_LANGUAGE}</code>, <code>{CONTEXT}</code>, <code>{GLOSSARY}</code>
+						<code>{SOURCE_LANGUAGE}</code>, <code>{TARGET_LANGUAGE}</code>, <code>{CONTEXT}</code>, <code>{GLOSSARY}</code>, <code>{LOCALE_INSTRUCTIONS}</code>, <code>{NEIGHBORING_STRINGS}</code>
 					</p>
 				</td>
 			</tr>

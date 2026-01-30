@@ -98,24 +98,86 @@ class Translate {
 	 *
 	 * @return array|WP_Error The translated strings or an error.
 	 */
-	public function translate_batch( $locale, $strings, $contexts = array() ) {
+	public function translate_batch( $locale, $strings, $contexts = array(), $original_ids = array(), $project_id = 0 ) {
 		if ( is_object( $locale ) ) {
 			$locale = $locale->slug;
 		}
 
-		return $this->openai_translate_batch( $locale, $strings, $contexts );
+		return $this->openai_translate_batch( $locale, $strings, $contexts, $original_ids, $project_id );
+	}
+
+	/**
+	 * Get neighboring original strings from the same project for context.
+	 *
+	 * @param int $original_id The current original ID.
+	 * @param int $project_id  The project ID.
+	 * @param int $count       Number of neighbors to fetch on each side.
+	 *
+	 * @return string Formatted neighboring strings text, or empty string.
+	 */
+	public function get_neighboring_strings( int $original_id, int $project_id, int $count = 5 ): string {
+		global $wpdb;
+
+		if ( ! $original_id || ! $project_id ) {
+			return '';
+		}
+
+		$table = GP::$original->table;
+
+		// Get preceding originals.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$before = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT singular FROM {$table}
+				WHERE project_id = %d AND id < %d AND status = '+active' AND plural IS NULL
+				ORDER BY id DESC LIMIT %d",
+				$project_id,
+				$original_id,
+				$count
+			)
+		);
+
+		// Get following originals.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$after = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT singular FROM {$table}
+				WHERE project_id = %d AND id > %d AND status = '+active' AND plural IS NULL
+				ORDER BY id ASC LIMIT %d",
+				$project_id,
+				$original_id,
+				$count
+			)
+		);
+
+		$neighbors = array_merge( array_reverse( $before ), $after );
+
+		if ( empty( $neighbors ) ) {
+			return '';
+		}
+
+		$quoted = array_map( function( $s ) {
+			return '"' . $s . '"';
+		}, $neighbors );
+
+		return implode( ', ', $quoted );
 	}
 
 	/**
 	 * Translate the text (Source language is always English).
 	 *
-	 * @param string $text    The text to translate.
-	 * @param string $locale  The locale to translate to.
-	 * @param string $context Optional translators comment context.
+	 * @param string    $text         The text to translate.
+	 * @param string    $locale       The locale to translate to.
+	 * @param string    $context      Optional translators comment context.
+	 * @param int       $original_id  Optional original ID for neighboring strings context.
+	 * @param int       $project_id   Optional project ID for neighboring strings context.
+	 * @param ?string   $model        Optional model override. Defaults to config value.
+	 * @param ?string   $prompt       Optional system prompt override. Defaults to config value.
+	 * @param ?bool     $use_glossary Optional glossary override. Defaults to config value.
 	 *
 	 * @return string
 	 */
-	public function translate( string $text, string $locale, string $context = '' ): string {
+	public function translate( string $text, string $locale, string $context = '', int $original_id = 0, int $project_id = 0, ?string $model = null, ?string $prompt = null, ?bool $use_glossary = null ): string {
 		// Check if the locale is supported.
 		if ( ! Locales::is_supported( $locale ) ) {
 			return $text;
@@ -146,8 +208,9 @@ class Translate {
 		}
 
 		// Build glossary replacement.
-		$glossary_text = '';
-		if ( Config::get_use_glossary() ) {
+		$glossary_text    = '';
+		$effective_glossary = $use_glossary ?? Config::get_use_glossary();
+		if ( $effective_glossary ) {
 			$matching_terms = Glossary::find_matching_terms( $text, $locale );
 			if ( ! empty( $matching_terms ) ) {
 				$glossary_text = Glossary::format_for_prompt( $matching_terms );
@@ -160,11 +223,20 @@ class Translate {
 			$context_text = sprintf( 'Context: %s.', $context );
 		}
 
+		// Build neighboring strings context.
+		$neighboring_text = '';
+		if ( $original_id && $project_id ) {
+			$neighboring_text = $this->get_neighboring_strings( $original_id, $project_id );
+		}
+
+		// Build locale instructions replacement.
+		$locale_instructions = Config::get_locale_instructions( $locale );
+
 		// Build system prompt from template with placeholder replacement.
-		$system_prompt = Config::get_system_prompt();
+		$system_prompt = $prompt ?? Config::get_system_prompt();
 		$system_prompt = str_replace(
-			array( '{SOURCE_LANGUAGE}', '{TARGET_LANGUAGE}', '{CONTEXT}', '{GLOSSARY}' ),
-			array( 'English', $locale_name, $context_text, $glossary_text ),
+			array( '{SOURCE_LANGUAGE}', '{TARGET_LANGUAGE}', '{CONTEXT}', '{GLOSSARY}', '{LOCALE_INSTRUCTIONS}', '{NEIGHBORING_STRINGS}' ),
+			array( 'English', $locale_name, $context_text, $glossary_text, $locale_instructions, $neighboring_text ),
 			$system_prompt
 		);
 		// Clean up extra whitespace from empty placeholders.
@@ -172,7 +244,7 @@ class Translate {
 
 		// build request.
 		$request = array(
-			'model'             => Config::get_model(),
+			'model'             => $model ?? Config::get_model(),
 			'messages'          => array(
 				array(
 					'role'    => 'system',
@@ -251,13 +323,18 @@ class Translate {
 	/**
 	 * Build the request payload for a single translation.
 	 *
-	 * @param string $text    The text to translate.
-	 * @param string $locale  The locale to translate to.
-	 * @param string $context Optional translators comment context.
+	 * @param string  $text         The text to translate.
+	 * @param string  $locale       The locale to translate to.
+	 * @param string  $context      Optional translators comment context.
+	 * @param int     $original_id  Optional original ID for neighboring strings context.
+	 * @param int     $project_id   Optional project ID for neighboring strings context.
+	 * @param ?string $model        Optional model override. Defaults to config value.
+	 * @param ?string $prompt       Optional system prompt override. Defaults to config value.
+	 * @param ?bool   $use_glossary Optional glossary override. Defaults to config value.
 	 *
 	 * @return array{endpoint: string, headers: array, body: array}|null Null if locale unsupported.
 	 */
-	protected function build_request_payload( string $text, string $locale, string $context = '' ): ?array {
+	protected function build_request_payload( string $text, string $locale, string $context = '', int $original_id = 0, int $project_id = 0, ?string $model = null, ?string $prompt = null, ?bool $use_glossary = null ): ?array {
 		if ( ! Locales::is_supported( $locale ) ) {
 			return null;
 		}
@@ -280,8 +357,9 @@ class Translate {
 		}
 
 		// Build glossary replacement.
-		$glossary_text = '';
-		if ( Config::get_use_glossary() ) {
+		$glossary_text    = '';
+		$effective_glossary = $use_glossary ?? Config::get_use_glossary();
+		if ( $effective_glossary ) {
 			$matching_terms = Glossary::find_matching_terms( $text, $locale );
 			if ( ! empty( $matching_terms ) ) {
 				$glossary_text = Glossary::format_for_prompt( $matching_terms );
@@ -294,11 +372,20 @@ class Translate {
 			$context_text = sprintf( 'Context: %s.', $context );
 		}
 
+		// Build neighboring strings context.
+		$neighboring_text = '';
+		if ( $original_id && $project_id ) {
+			$neighboring_text = $this->get_neighboring_strings( $original_id, $project_id );
+		}
+
+		// Build locale instructions replacement.
+		$locale_instructions = Config::get_locale_instructions( $locale );
+
 		// Build system prompt from template with placeholder replacement.
-		$system_prompt = Config::get_system_prompt();
+		$system_prompt = $prompt ?? Config::get_system_prompt();
 		$system_prompt = str_replace(
-			array( '{SOURCE_LANGUAGE}', '{TARGET_LANGUAGE}', '{CONTEXT}', '{GLOSSARY}' ),
-			array( 'English', $locale_name, $context_text, $glossary_text ),
+			array( '{SOURCE_LANGUAGE}', '{TARGET_LANGUAGE}', '{CONTEXT}', '{GLOSSARY}', '{LOCALE_INSTRUCTIONS}', '{NEIGHBORING_STRINGS}' ),
+			array( 'English', $locale_name, $context_text, $glossary_text, $locale_instructions, $neighboring_text ),
 			$system_prompt
 		);
 		$system_prompt = preg_replace( '/\s+/', ' ', trim( $system_prompt ) );
@@ -309,7 +396,7 @@ class Translate {
 		}
 
 		$body = array(
-			'model'             => Config::get_model(),
+			'model'             => $model ?? Config::get_model(),
 			'messages'          => array(
 				array(
 					'role'    => 'system',
@@ -403,7 +490,7 @@ class Translate {
 	 *
 	 * @return array|WP_Error The translated strings or an error.
 	 */
-	protected function openai_translate_batch( $locale, $strings, $contexts = array() ) {
+	protected function openai_translate_batch( $locale, $strings, $contexts = array(), $original_ids = array(), $project_id = 0 ) {
 		if ( ! Locales::is_supported( $locale ) ) {
 			return new WP_Error( 'gpoai_translate', sprintf( "The locale %s isn't supported by OpenAI.", $locale ) );
 		}
@@ -425,13 +512,15 @@ class Translate {
 			$translated_strings = array();
 			foreach ( $strings as $index => $string ) {
 				$context              = $contexts[ $index ] ?? '';
-				$translated_strings[] = $this->translate( $string, $locale, $context );
+				$orig_id              = $original_ids[ $index ] ?? 0;
+				$translated_strings[] = $this->translate( $string, $locale, $context, (int) $orig_id, (int) $project_id );
 			}
 		} else {
 			// Build all payloads.
 			$payloads = array();
 			foreach ( $strings as $index => $text ) {
-				$payload = $this->build_request_payload( $text, $locale, $contexts[ $index ] ?? '' );
+				$orig_id = $original_ids[ $index ] ?? 0;
+				$payload = $this->build_request_payload( $text, $locale, $contexts[ $index ] ?? '', (int) $orig_id, (int) $project_id );
 				if ( null === $payload ) {
 					$payloads[ $index ] = null;
 				} else {
@@ -547,7 +636,7 @@ class Translate {
 		}
 
 		// Translate all the originals that we found.
-		$results = $this->translate_batch( $locale, $singulars, $contexts );
+		$results = $this->translate_batch( $locale, $singulars, $contexts, $original_ids, $project->id );
 
 		// Did we get an error?
 		if ( is_wp_error( $results ) ) {

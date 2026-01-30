@@ -126,8 +126,10 @@ Use natural language.
 Do not explain.
 Do not add quotes.
 Preserve punctuation, formatting, HTML, placeholders (%s, %1$s, %2$d), and variables exactly.
-{CONTEXT}
-{GLOSSARY}';
+{LOCALE_INSTRUCTIONS}
+{GLOSSARY}
+Neighboring strings from the same project for context: {NEIGHBORING_STRINGS}
+{CONTEXT}';
 
 	/**
 	 * Get system prompt.
@@ -168,6 +170,23 @@ Preserve punctuation, formatting, HTML, placeholders (%s, %1$s, %2$d), and varia
 		$user_custom_prompt = get_user_meta( $user_id, 'gpoai_custom_prompt', true );
 
 		return (string) $user_custom_prompt;
+	}
+
+	/**
+	 * Get locale-specific translation instructions.
+	 *
+	 * @param string $locale The locale slug.
+	 *
+	 * @return string Formatted instructions or empty string.
+	 */
+	public static function get_locale_instructions( string $locale ): string {
+		$instructions = Locale_Instructions::get_instructions( $locale );
+
+		if ( empty( $instructions ) ) {
+			return '';
+		}
+
+		return $instructions;
 	}
 
 	/**

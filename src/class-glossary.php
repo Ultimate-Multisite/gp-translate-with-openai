@@ -157,6 +157,9 @@ class Glossary {
 			if ( ! empty( $entry['part_of_speech'] ) ) {
 				$term_string .= sprintf( ' (%s)', $entry['part_of_speech'] );
 			}
+			if ( ! empty( $entry['comment'] ) ) {
+				$term_string .= sprintf( ' [%s]', $entry['comment'] );
+			}
 			$formatted_entries[] = $term_string;
 		}
 

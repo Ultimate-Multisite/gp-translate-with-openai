@@ -47,6 +47,9 @@ class Settings {
 		// Option: Custom Prompt.
 		$this->register_field_custom_prompt();
 
+		// Option: Locale Instructions.
+		$this->register_field_locale_instructions();
+
 		// Option: Temperature.
 		$this->register_field_temperature();
 
@@ -360,8 +363,135 @@ class Settings {
 			<?php esc_html_e( 'The system prompt sent to the AI model. The user message will contain only the text to translate.', 'gp-translate-with-openai' ); ?>
 			<br>
 			<?php esc_html_e( 'Available placeholders:', 'gp-translate-with-openai' ); ?>
-			<code>{SOURCE_LANGUAGE}</code>, <code>{TARGET_LANGUAGE}</code>, <code>{CONTEXT}</code>, <code>{GLOSSARY}</code>
+			<code>{SOURCE_LANGUAGE}</code>, <code>{TARGET_LANGUAGE}</code>, <code>{CONTEXT}</code>, <code>{GLOSSARY}</code>, <code>{LOCALE_INSTRUCTIONS}</code>, <code>{NEIGHBORING_STRINGS}</code>
 		</p>
+		<?php
+	}
+
+	/**
+	 * Register settings field Locale Instructions.
+	 *
+	 * @return void
+	 */
+	public function register_field_locale_instructions(): void {
+		$field_name    = 'gpoai_locale_instructions';
+		$section_name  = 'gpoai_section';
+		$settings_name = 'gpoai_settings';
+
+		register_setting(
+			$settings_name,
+			$field_name,
+			array(
+				'label'             => __( 'Locale Instructions', 'gp-translate-with-openai' ),
+				'description'       => __( 'Per-locale translation instructions included in the prompt.', 'gp-translate-with-openai' ),
+				'type'              => 'array',
+				'sanitize_callback' => array( $this, 'sanitize_locale_instructions' ),
+				'default'           => array(),
+				'show_in_rest'      => false,
+			),
+		);
+
+		add_settings_field(
+			$field_name,
+			__( 'Locale Instructions', 'gp-translate-with-openai' ),
+			array( $this, 'render_field_locale_instructions' ),
+			$settings_name,
+			$section_name,
+			array(
+				'label_for' => $field_name,
+			),
+		);
+	}
+
+	/**
+	 * Sanitize locale instructions.
+	 *
+	 * @param mixed $value The value to sanitize.
+	 *
+	 * @return array
+	 */
+	public function sanitize_locale_instructions( $value ): array {
+		if ( ! is_array( $value ) ) {
+			return array();
+		}
+
+		$sanitized = array();
+		foreach ( $value as $locale => $instructions ) {
+			$locale       = sanitize_text_field( $locale );
+			$instructions = sanitize_textarea_field( $instructions );
+			if ( ! empty( $instructions ) ) {
+				$sanitized[ $locale ] = $instructions;
+			}
+		}
+
+		return $sanitized;
+	}
+
+	/**
+	 * Render settings field Locale Instructions.
+	 *
+	 * @return void
+	 */
+	public function render_field_locale_instructions(): void {
+		$field_name = 'gpoai_locale_instructions';
+		$saved      = get_option( $field_name, array() );
+		if ( ! is_array( $saved ) ) {
+			$saved = array();
+		}
+
+		$defaults          = Locale_Instructions::get_default_instructions();
+		$available_locales = Locales::get_supported_locales();
+
+		// Show locales that have saved instructions or defaults.
+		$shown_locales = array_unique( array_merge( array_keys( $saved ), array_keys( $defaults ) ) );
+		sort( $shown_locales );
+
+		// Remaining locales for the "Add locale" dropdown.
+		$remaining_locales = array_diff( array_keys( $available_locales ), $shown_locales );
+		?>
+		<div id="gpoai-locale-instructions-wrap">
+		<?php foreach ( $shown_locales as $locale ) :
+			$locale_name  = $available_locales[ $locale ] ?? $locale;
+			$saved_value  = $saved[ $locale ] ?? '';
+			$default_text = $defaults[ $locale ] ?? '';
+		?>
+			<div class="gpoai-locale-instruction" style="margin-bottom: 10px;">
+				<label><strong><?php echo esc_html( $locale_name ); ?> (<?php echo esc_html( $locale ); ?>)</strong></label><br>
+				<textarea name="<?php echo esc_attr( $field_name ); ?>[<?php echo esc_attr( $locale ); ?>]" class="large-text" rows="2" placeholder="<?php echo esc_attr( $default_text ); ?>"><?php echo esc_textarea( $saved_value ); ?></textarea>
+			</div>
+		<?php endforeach; ?>
+		</div>
+
+		<?php if ( ! empty( $remaining_locales ) ) : ?>
+		<div style="margin-top: 10px;">
+			<select id="gpoai-add-locale-select">
+				<option value=""><?php esc_html_e( '— Add locale —', 'gp-translate-with-openai' ); ?></option>
+				<?php foreach ( $remaining_locales as $locale ) : ?>
+					<option value="<?php echo esc_attr( $locale ); ?>"><?php echo esc_html( ( $available_locales[ $locale ] ?? $locale ) . ' (' . $locale . ')' ); ?></option>
+				<?php endforeach; ?>
+			</select>
+			<button type="button" class="button" id="gpoai-add-locale-btn"><?php esc_html_e( 'Add', 'gp-translate-with-openai' ); ?></button>
+		</div>
+		<script>
+		jQuery(document).ready(function($) {
+			$('#gpoai-add-locale-btn').on('click', function() {
+				var $sel = $('#gpoai-add-locale-select');
+				var locale = $sel.val();
+				if (!locale) return;
+				var label = $sel.find('option:selected').text();
+				var html = '<div class="gpoai-locale-instruction" style="margin-bottom: 10px;">' +
+					'<label><strong>' + label + '</strong></label><br>' +
+					'<textarea name="<?php echo esc_attr( $field_name ); ?>[' + locale + ']" class="large-text" rows="2"></textarea>' +
+					'</div>';
+				$('#gpoai-locale-instructions-wrap').append(html);
+				$sel.find('option:selected').remove();
+				$sel.val('');
+			});
+		});
+		</script>
+		<?php endif; ?>
+
+		<p class="description"><?php esc_html_e( 'Per-locale instructions injected into the prompt via {LOCALE_INSTRUCTIONS}. Leave empty to use the default. Clear text to remove.', 'gp-translate-with-openai' ); ?></p>
 		<?php
 	}
 

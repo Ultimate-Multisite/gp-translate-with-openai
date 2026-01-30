@@ -172,7 +172,7 @@ class Quality_Test {
 							<textarea name="prompt" id="test_prompt" class="large-text" rows="4"><?php echo esc_textarea( $default_prompt ); ?></textarea>
 							<p class="description">
 								<?php esc_html_e( 'Placeholders:', 'gp-translate-with-openai' ); ?>
-								<code>{SOURCE_LANGUAGE}</code>, <code>{TARGET_LANGUAGE}</code>, <code>{CONTEXT}</code>, <code>{GLOSSARY}</code>
+								<code>{SOURCE_LANGUAGE}</code>, <code>{TARGET_LANGUAGE}</code>, <code>{CONTEXT}</code>, <code>{GLOSSARY}</code>, <code>{LOCALE_INSTRUCTIONS}</code>, <code>{NEIGHBORING_STRINGS}</code>
 							</p>
 						</td>
 					</tr>
@@ -1071,19 +1071,6 @@ class Quality_Test {
 			wp_send_json_error( array( 'message' => __( 'Source and locale are required.', 'gp-translate-with-openai' ) ) );
 		}
 
-		// Temporarily override config.
-		$original_model    = get_option( 'gpoai_model' );
-		$original_prompt   = get_option( 'gpoai_custom_prompt' );
-		$original_glossary = get_option( 'gpoai_use_glossary' );
-
-		if ( ! empty( $model ) ) {
-			update_option( 'gpoai_model', $model );
-		}
-		if ( $prompt !== $original_prompt ) {
-			update_option( 'gpoai_custom_prompt', $prompt );
-		}
-		update_option( 'gpoai_use_glossary', $use_glossary );
-
 		// Capture token usage via debug callback.
 		$usage_data = array(
 			'prompt_tokens'     => 0,
@@ -1100,17 +1087,22 @@ class Quality_Test {
 			}
 		} );
 
-		// Perform translation with timing.
+		// Perform translation with timing, passing overrides as parameters.
 		$start_time  = microtime( true );
 		$translate   = Translate::instance();
-		$translation = $translate->translate( $source, $locale );
+		$translation = $translate->translate(
+			$source,
+			$locale,
+			'',
+			0,
+			0,
+			! empty( $model ) ? $model : null,
+			! empty( $prompt ) ? $prompt : null,
+			$use_glossary
+		);
 		$duration_ms = round( ( microtime( true ) - $start_time ) * 1000 );
 
-		// Restore.
 		Translate::set_debug( false );
-		update_option( 'gpoai_model', $original_model );
-		update_option( 'gpoai_custom_prompt', $original_prompt );
-		update_option( 'gpoai_use_glossary', $original_glossary );
 
 		$similarity = 0;
 		if ( ! empty( $human ) ) {
@@ -1240,7 +1232,7 @@ class Quality_Test {
 		$cached    = get_transient( $cache_key );
 
 		if ( false !== $cached && is_array( $cached ) ) {
-			return array_slice( $cached, 0, $count );
+			return array_slice( $cached, 15, $count );
 		}
 
 		$wporg_locale = $this->convert_locale_to_wporg( $locale );
@@ -1280,7 +1272,9 @@ class Quality_Test {
 			set_transient( $cache_key, $strings, self::CACHE_EXPIRY );
 		}
 
-		return array_slice( $strings, 0, $count );
+		// Skip the first 15 entries which are typically metadata-like strings
+		// (date formats, number formats, etc.) not suitable for translation testing.
+		return array_slice( $strings, 15, $count );
 	}
 
 	/**

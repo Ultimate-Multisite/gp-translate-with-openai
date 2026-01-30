@@ -188,7 +188,7 @@ class Automation {
 			}
 
 			// Translate the string.
-			$translation = $translate->translate( $original->singular, $locale );
+			$translation = $translate->translate( $original->singular, $locale, $original->comment ?? '', (int) $original_id, $project_id );
 
 			// Skip if translation failed or returned the original.
 			if ( empty( $translation ) || $translation === $original->singular ) {
@@ -198,18 +198,77 @@ class Automation {
 			// Check for warnings.
 			$warnings = GP::$translation_warnings->check( $original->singular, null, array( $translation ), $locale );
 
-			// Create the translation as fuzzy.
+			// Run safety checks to determine status.
+			$status = self::validate_translation( $original->singular, $translation );
+
+			// If GlotPress detected warnings, downgrade to waiting.
+			if ( 'current' === $status && ! empty( $warnings ) ) {
+				$status = 'waiting';
+			}
+
+			// Create the translation.
 			GP::$translation->create(
 				array(
 					'original_id'        => $original_id,
 					'translation_set_id' => $translation_set_id,
 					'translation_0'      => $translation,
-					'status'             => 'fuzzy',
+					'status'             => $status,
 					'user_id'            => 0, // System user.
 					'warnings'           => $warnings,
 				)
 			);
 		}
+	}
+
+	/**
+	 * Validate a translation against the original for safety.
+	 *
+	 * Checks for missing placeholders, HTML tags, and other structural issues.
+	 * Returns 'current' if the translation passes all checks, 'waiting' otherwise.
+	 *
+	 * @param string $original    The original string.
+	 * @param string $translation The translated string.
+	 *
+	 * @return string 'current' or 'waiting'.
+	 */
+	public static function validate_translation( string $original, string $translation ): string {
+		// Check placeholders like %s, %d, %1$s, %2$d, etc.
+		preg_match_all( '/%(?:\d+\$)?[sdfFe]/', $original, $orig_placeholders );
+		preg_match_all( '/%(?:\d+\$)?[sdfFe]/', $translation, $trans_placeholders );
+
+		$orig_sorted  = $orig_placeholders[0];
+		$trans_sorted = $trans_placeholders[0];
+		sort( $orig_sorted );
+		sort( $trans_sorted );
+
+		if ( $orig_sorted !== $trans_sorted ) {
+			return 'waiting';
+		}
+
+		// Check HTML tags (opening and closing).
+		preg_match_all( '/<\/?[a-zA-Z][^>]*>/', $original, $orig_tags );
+		preg_match_all( '/<\/?[a-zA-Z][^>]*>/', $translation, $trans_tags );
+
+		$orig_tag_sorted  = $orig_tags[0];
+		$trans_tag_sorted = $trans_tags[0];
+		sort( $orig_tag_sorted );
+		sort( $trans_tag_sorted );
+
+		if ( $orig_tag_sorted !== $trans_tag_sorted ) {
+			return 'waiting';
+		}
+
+		// Check that URLs in the original are preserved.
+		preg_match_all( '/https?:\/\/[^\s<>"\']+/', $original, $orig_urls );
+		if ( ! empty( $orig_urls[0] ) ) {
+			foreach ( $orig_urls[0] as $url ) {
+				if ( strpos( $translation, $url ) === false ) {
+					return 'waiting';
+				}
+			}
+		}
+
+		return 'current';
 	}
 
 	/**
