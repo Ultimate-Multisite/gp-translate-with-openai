@@ -71,6 +71,9 @@ class Quality_Test {
 	public function render_page(): void {
 		$available_locales = Locales::get_supported_locales();
 		$models            = Api::get_available_models();
+		if ( is_wp_error( $models ) ) {
+			$models = Api::DEFAULT_MODELS;
+		}
 		$default_model     = Config::get_model();
 		$default_prompt    = Config::get_system_prompt();
 		$saved_results     = get_option( self::RESULTS_OPTION, array() );

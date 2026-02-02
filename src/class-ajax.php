@@ -126,23 +126,27 @@ class Ajax {
 
 		// Clear cache and fetch fresh models.
 		Api::clear_models_cache();
-		$models = Api::get_available_models( true );
+		$result = Api::get_available_models( true );
 
-		if ( empty( $models ) ) {
+		if ( is_wp_error( $result ) ) {
 			wp_send_json_error(
 				array(
-					'message' => __( 'Could not fetch models. Check your API key and Base URL settings.', 'gp-translate-with-openai' ),
+					'message' => sprintf(
+						/* translators: %s: error message */
+						__( 'Failed to fetch models: %s', 'gp-translate-with-openai' ),
+						$result->get_error_message()
+					),
 				)
 			);
 		}
 
 		wp_send_json_success(
 			array(
-				'models'  => $models,
+				'models'  => $result,
 				'message' => sprintf(
 					/* translators: %d: number of models */
 					__( 'Found %d models.', 'gp-translate-with-openai' ),
-					count( $models )
+					count( $result )
 				),
 			)
 		);

@@ -334,8 +334,8 @@ class CLI {
 		update_option( 'gpoai_base_url', $original_base_url );
 		update_option( 'gpoai_api_key', $original_api_key );
 
-		if ( empty( $models ) ) {
-			WP_CLI::error( 'Could not fetch models. Check your API key and base URL.' );
+		if ( is_wp_error( $models ) ) {
+			WP_CLI::error( 'Could not fetch models: ' . $models->get_error_message() );
 		}
 
 		if ( 'list' === $format ) {

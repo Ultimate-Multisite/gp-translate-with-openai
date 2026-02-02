@@ -268,6 +268,9 @@ class Settings {
 
 		// Get models from API (with caching).
 		$models        = Api::get_available_models();
+		if ( is_wp_error( $models ) ) {
+			$models = Api::DEFAULT_MODELS;
+		}
 		$current_model = get_option( $field_name, 'gpt-3.5-turbo' );
 
 		// Ensure current model is in the list.

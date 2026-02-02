@@ -21,6 +21,36 @@ composer install
 
 There are no automated tests (PHPUnit), no JS build step, and no CI/CD pipeline.
 
+## Local Development Environment
+
+Uses `@wordpress/env` (Docker-based) with GlotPress pre-installed.
+
+```bash
+# Start the environment
+npx @wordpress/env start
+
+# Stop
+npx @wordpress/env stop
+
+# Run WP-CLI commands
+npx @wordpress/env run cli wp <command>
+
+# Clean rebuild
+npx @wordpress/env destroy
+npx @wordpress/env start
+```
+
+- **Dev site:** http://localhost:8892 (admin / password)
+- **Test site:** http://localhost:8893
+- **GlotPress:** http://localhost:8892/projects/
+- **Config:** `.wp-env.json` — ports, plugins, `GP_URL_BASE`, lifecycle scripts
+
+Lifecycle scripts handle setup automatically on start:
+- Permalinks set to `/%postname%/` with `.htaccess` (`--hard`)
+- `gpoai_base_url` pointed at local Ollama (`http://127.0.0.1:11434`)
+- Sample GlotPress project with es/de/fr translation sets and 10 originals (`bin/setup-sample-data.php`)
+- Composer dependencies installed on first setup (`afterSetup`)
+
 ## Architecture
 
 **Entry point:** `gp-translate-with-openai.php` — hooks `after_setup_theme`, loads all classes from `src/`.

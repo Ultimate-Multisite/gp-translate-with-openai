@@ -166,11 +166,14 @@ class Automation {
 		$locale    = $translation_set->locale;
 		$translate = Translate::instance();
 
+		// Get locale plural info.
+		$locale_obj = \GP_Locales::by_slug( $locale );
+		$nplurals   = $locale_obj ? $locale_obj->nplurals : 2;
+
 		foreach ( $original_ids as $original_id ) {
 			// Get the original.
 			$original = GP::$original->get( $original_id );
-			if ( ! $original || $original->plural ) {
-				// Skip plurals for now.
+			if ( ! $original ) {
 				continue;
 			}
 
@@ -187,36 +190,75 @@ class Automation {
 				continue;
 			}
 
-			// Translate the string.
-			$translation = $translate->translate( $original->singular, $locale, $original->comment ?? '', (int) $original_id, $project_id );
+			if ( $original->plural ) {
+				// Translate plural string.
+				$result = $translate->translate_plural(
+					$original->singular,
+					$original->plural,
+					$locale,
+					$nplurals,
+					$original->comment ?? '',
+					(int) $original_id,
+					$project_id
+				);
 
-			// Skip if translation failed or returned the original.
-			if ( empty( $translation ) || $translation === $original->singular ) {
-				continue;
-			}
+				// translate_plural returns an array on success, original singular on failure.
+				if ( ! is_array( $result ) ) {
+					continue;
+				}
 
-			// Check for warnings.
-			$warnings = GP::$translation_warnings->check( $original->singular, null, array( $translation ), $locale );
-
-			// Run safety checks to determine status.
-			$status = self::validate_translation( $original->singular, $translation );
-
-			// If GlotPress detected warnings, downgrade to waiting.
-			if ( 'current' === $status && ! empty( $warnings ) ) {
-				$status = 'waiting';
-			}
-
-			// Create the translation.
-			GP::$translation->create(
-				array(
+				$data = array(
 					'original_id'        => $original_id,
 					'translation_set_id' => $translation_set_id,
-					'translation_0'      => $translation,
-					'status'             => $status,
-					'user_id'            => 0, // System user.
-					'warnings'           => $warnings,
-				)
-			);
+					'status'             => 'waiting',
+					'user_id'            => 0,
+				);
+
+				for ( $i = 0; $i < $nplurals; $i++ ) {
+					$data[ 'translation_' . $i ] = $result[ $i ] ?? '';
+				}
+
+				// Check warnings using all plural forms.
+				$translation_array = array();
+				for ( $i = 0; $i < $nplurals; $i++ ) {
+					$translation_array[] = $result[ $i ] ?? '';
+				}
+				$warnings         = GP::$translation_warnings->check( $original->singular, $original->plural, $translation_array, $locale_obj );
+				$data['warnings'] = $warnings;
+
+				GP::$translation->create( $data );
+			} else {
+				// Translate singular string.
+				$translation = $translate->translate( $original->singular, $locale, $original->comment ?? '', (int) $original_id, $project_id );
+
+				// Skip if translation is empty.
+				if ( empty( $translation ) ) {
+					continue;
+				}
+
+				// Check for warnings.
+				$warnings = GP::$translation_warnings->check( $original->singular, null, array( $translation ), $locale_obj );
+
+				// Run safety checks to determine status.
+				$status = self::validate_translation( $original->singular, $translation );
+
+				// If GlotPress detected warnings, downgrade to waiting.
+				if ( 'current' === $status && ! empty( $warnings ) ) {
+					$status = 'waiting';
+				}
+
+				// Create the translation.
+				GP::$translation->create(
+					array(
+						'original_id'        => $original_id,
+						'translation_set_id' => $translation_set_id,
+						'translation_0'      => $translation,
+						'status'             => $status,
+						'user_id'            => 0,
+						'warnings'           => $warnings,
+					)
+				);
+			}
 		}
 	}
 
@@ -294,7 +336,6 @@ class Automation {
 					AND t.status IN ('current', 'waiting', 'fuzzy')
 				WHERE o.project_id = %d
 					AND o.status = '+active'
-					AND o.plural IS NULL
 					AND t.id IS NULL
 				ORDER BY o.id ASC",
 				$translation_set_id,

@@ -44,6 +44,12 @@ function setup() {
 	// https://github.com/orhanerday/open-ai .
 	require_once trailingslashit( __DIR__ ) . 'vendor/autoload.php';
 
+	// Load Action Scheduler bootstrap (not autoloaded by Composer).
+	$action_scheduler_file = trailingslashit( __DIR__ ) . 'vendor/woocommerce/action-scheduler/action-scheduler.php';
+	if ( file_exists( $action_scheduler_file ) ) {
+		require_once $action_scheduler_file;
+	}
+
 	require_once trailingslashit( __DIR__ ) . 'src/class-config.php';
 	require_once trailingslashit( __DIR__ ) . 'src/class-locales.php';
 	require_once trailingslashit( __DIR__ ) . 'src/class-api.php';

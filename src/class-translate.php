@@ -569,6 +569,158 @@ class Translate {
 	}
 
 	/**
+	 * Translate a plural string, returning all plural forms for the locale.
+	 *
+	 * @param string $singular    The singular form.
+	 * @param string $plural      The plural form.
+	 * @param string $locale      The locale to translate to.
+	 * @param int    $nplurals    Number of plural forms for the locale.
+	 * @param string $context     Optional translators comment context.
+	 * @param int    $original_id Optional original ID for neighboring strings context.
+	 * @param int    $project_id  Optional project ID for neighboring strings context.
+	 *
+	 * @return array|string Array of plural form translations indexed 0..nplurals-1, or original singular on failure.
+	 */
+	public function translate_plural( string $singular, string $plural, string $locale, int $nplurals, string $context = '', int $original_id = 0, int $project_id = 0 ) {
+		if ( ! Locales::is_supported( $locale ) ) {
+			return $singular;
+		}
+
+		$api_key = Config::get_api_key();
+		$openai  = new OpenAi( ! empty( $api_key ) ? $api_key : 'ollama' );
+
+		$base_url = Config::get_base_url();
+		if ( ! empty( $base_url ) ) {
+			$openai->setBaseURL( $base_url );
+		}
+
+		// Get locale name.
+		$locale_name = '';
+		if ( class_exists( 'GP_Locales' ) ) {
+			$locale_obj = GP_Locales::by_slug( $locale );
+			if ( $locale_obj ) {
+				$locale_name = $locale_obj->english_name;
+			}
+		}
+		if ( empty( $locale_name ) ) {
+			$supported_locales = Locales::get_supported_locales();
+			$locale_name       = $supported_locales[ $locale ] ?? $locale;
+		}
+
+		// Build glossary.
+		$glossary_text = '';
+		if ( Config::get_use_glossary() ) {
+			$matching_terms = Glossary::find_matching_terms( $singular . ' ' . $plural, $locale );
+			if ( ! empty( $matching_terms ) ) {
+				$glossary_text = Glossary::format_for_prompt( $matching_terms );
+			}
+		}
+
+		// Build context.
+		$context_text = '';
+		if ( ! empty( $context ) ) {
+			$context_text = sprintf( 'Context: %s.', $context );
+		}
+
+		// Build neighboring strings.
+		$neighboring_text = '';
+		if ( $original_id && $project_id ) {
+			$neighboring_text = $this->get_neighboring_strings( $original_id, $project_id );
+		}
+
+		// Build locale instructions.
+		$locale_instructions = Config::get_locale_instructions( $locale );
+
+		// Build system prompt.
+		$system_prompt = Config::get_system_prompt();
+		$system_prompt = str_replace(
+			array( '{SOURCE_LANGUAGE}', '{TARGET_LANGUAGE}', '{CONTEXT}', '{GLOSSARY}', '{LOCALE_INSTRUCTIONS}', '{NEIGHBORING_STRINGS}' ),
+			array( 'English', $locale_name, $context_text, $glossary_text, $locale_instructions, $neighboring_text ),
+			$system_prompt
+		);
+		$system_prompt = preg_replace( '/\s+/', ' ', trim( $system_prompt ) );
+
+		// Build plural-specific user message.
+		$form_labels = array();
+		for ( $i = 0; $i < $nplurals; $i++ ) {
+			$form_labels[] = 'form' . $i;
+		}
+		$user_message = sprintf(
+			"Translate this plural string. The English singular is: \"%s\" and the English plural is: \"%s\". " .
+			"This locale requires %d plural forms. Return ONLY a JSON object with keys %s containing each translated plural form. " .
+			"Do not include any explanation, markdown formatting, or code blocks — return only the raw JSON object.",
+			$singular,
+			$plural,
+			$nplurals,
+			implode( ', ', array_map( function ( $l ) { return '"' . $l . '"'; }, $form_labels ) )
+		);
+
+		$request = array(
+			'model'             => Config::get_model(),
+			'messages'          => array(
+				array(
+					'role'    => 'system',
+					'content' => $system_prompt,
+				),
+				array(
+					'role'    => 'user',
+					'content' => $user_message,
+				),
+			),
+			'temperature'       => Config::get_temperature(),
+			'max_tokens'        => 1000,
+			'frequency_penalty' => 0,
+			'presence_penalty'  => 0,
+		);
+
+		self::debug( 'PLURAL_REQUEST', $request );
+
+		try {
+			$chat     = $openai->chat( $request );
+			$response = json_decode( $chat );
+		} catch ( \Exception $e ) {
+			self::debug( 'PLURAL_ERROR', $e->getMessage() );
+			return $singular;
+		}
+
+		if ( isset( $response->error ) || ! isset( $response->choices[0]->message->content ) ) {
+			self::debug( 'PLURAL_ERROR', $response->error ?? 'Invalid response' );
+			return $singular;
+		}
+
+		$content = trim( $response->choices[0]->message->content );
+
+		// Strip markdown code fences if present.
+		$content = preg_replace( '/^```(?:json)?\s*/i', '', $content );
+		$content = preg_replace( '/\s*```$/', '', $content );
+
+		$parsed = json_decode( $content, true );
+
+		self::debug( 'PLURAL_RESULT', array(
+			'raw'    => $content,
+			'parsed' => $parsed,
+		) );
+
+		if ( ! is_array( $parsed ) ) {
+			return $singular;
+		}
+
+		// Build result array indexed 0..nplurals-1.
+		$result = array();
+		for ( $i = 0; $i < $nplurals; $i++ ) {
+			$key = 'form' . $i;
+			if ( isset( $parsed[ $key ] ) && ! empty( $parsed[ $key ] ) ) {
+				$result[ $i ] = $parsed[ $key ];
+			} else {
+				// Fallback: if the model returned different keys, try numeric index.
+				return $singular;
+			}
+		}
+
+		return $result;
+	}
+
+	/**
 	 * Cleans up the translation string.
 	 *
 	 * @param string $text The string to clean.
@@ -616,66 +768,107 @@ class Translate {
 		$contexts     = array();
 		$original_ids = array();
 
-		// Loop through each of the passed in strings and translate them.
-		foreach ( $bulk['row-ids'] as $row_id ) {
-			// Split the $row_id by '-' and get the first one (which will be the id of the original).
-			$original_id = gp_array_get( explode( '-', $row_id ), 0 );
-			// Get the original based on the above id.
-			$original = GP::$original->get( $original_id );
+		// Get locale plural info.
+		$locale_obj = GP_Locales::by_slug( is_object( $locale ) ? $locale->slug : $locale );
+		$nplurals   = $locale_obj ? $locale_obj->nplurals : 2;
 
-			// If there is no original or it's a plural, skip it.
-			if ( ! $original || $original->plural ) {
+		// Separate singular and plural originals.
+		$singular_originals = array();
+		$plural_originals   = array();
+
+		foreach ( $bulk['row-ids'] as $row_id ) {
+			$original_id = gp_array_get( explode( '-', $row_id ), 0 );
+			$original    = GP::$original->get( $original_id );
+
+			if ( ! $original ) {
 				++$count['skipped'];
 				continue;
 			}
 
-			// Add the original to the queue to translate.
-			$singulars[]    = $original->singular;
-			$contexts[]     = $original->comment ?? '';
-			$original_ids[] = $original_id;
+			if ( $original->plural ) {
+				$plural_originals[] = $original;
+			} else {
+				$singular_originals[] = $original;
+				$singulars[]          = $original->singular;
+				$contexts[]           = $original->comment ?? '';
+				$original_ids[]       = $original_id;
+			}
 		}
 
-		// Translate all the originals that we found.
-		$results = $this->translate_batch( $locale, $singulars, $contexts, $original_ids, $project->id );
+		// Batch translate singular strings.
+		if ( ! empty( $singulars ) ) {
+			$results = $this->translate_batch( $locale, $singulars, $contexts, $original_ids, $project->id );
 
-		// Did we get an error?
-		if ( is_wp_error( $results ) ) {
-			gp_notice_set( $results->get_error_message(), 'error' );
-			return;
+			if ( is_wp_error( $results ) ) {
+				gp_notice_set( $results->get_error_message(), 'error' );
+				return;
+			}
+
+			$items = gp_array_zip( $original_ids, $singulars, $results );
+
+			if ( $items ) {
+				foreach ( $items as $item ) {
+					list( $original_id, $singular, $translation ) = $item;
+
+					if ( is_wp_error( $translation ) ) {
+						++$count['err_api'];
+						continue;
+					}
+
+					$warnings = GP::$translation_warnings->check( $singular, null, array( $translation ), $locale );
+
+					$data = array(
+						'original_id'        => $original_id,
+						'user_id'            => get_current_user_id(),
+						'translation_set_id' => $translation_set->id,
+						'translation_0'      => $translation,
+						'status'             => 'fuzzy',
+						'warnings'           => $warnings,
+					);
+
+					$inserted = GP::$translation->create( $data );
+					if ( $inserted ) {
+						++$count['added'];
+					} else {
+						++$count['err_add'];
+					}
+				}
+			}
 		}
 
-		// Merge the results back in to the original id's and singulars
-		// This will create an array like ($items = array( array( id, single, result), array( id, single, result), ... ).
-		$items = gp_array_zip( $original_ids, $singulars, $results );
+		// Translate plural strings one by one.
+		foreach ( $plural_originals as $original ) {
+			$result = $this->translate_plural(
+				$original->singular,
+				$original->plural,
+				is_object( $locale ) ? $locale->slug : $locale,
+				$nplurals,
+				$original->comment ?? '',
+				(int) $original->id,
+				$project->id
+			);
 
-		// If we have no items, something went wrong and stop processing.
-		if ( ! $items ) {
-			return;
-		}
-
-		// Loop through the items and store them in the database.
-		foreach ( $items as $item ) {
-			// Break up the item back in to individual components.
-			list( $original_id, $singular, $translation ) = $item;
-
-			// Did we get an error?
-			if ( is_wp_error( $translation ) ) {
+			if ( ! is_array( $result ) ) {
 				++$count['err_api'];
 				continue;
 			}
 
-			$warnings = GP::$translation_warnings->check( $singular, null, array( $translation ), $locale );
+			$data = array(
+				'original_id'        => $original->id,
+				'user_id'            => get_current_user_id(),
+				'translation_set_id' => $translation_set->id,
+				'status'             => 'fuzzy',
+			);
 
-			// Build a data array to store.
-			$data                       = array();
-			$data['original_id']        = $original_id;
-			$data['user_id']            = get_current_user_id();
-			$data['translation_set_id'] = $translation_set->id;
-			$data['translation_0']      = $translation;
-			$data['status']             = 'fuzzy';
-			$data['warnings']           = $warnings;
+			$translation_array = array();
+			for ( $i = 0; $i < $nplurals; $i++ ) {
+				$data[ 'translation_' . $i ] = $result[ $i ] ?? '';
+				$translation_array[]         = $result[ $i ] ?? '';
+			}
 
-			// Insert the item in to the database.
+			$warnings         = GP::$translation_warnings->check( $original->singular, $original->plural, $translation_array, $locale );
+			$data['warnings'] = $warnings;
+
 			$inserted = GP::$translation->create( $data );
 			if ( $inserted ) {
 				++$count['added'];

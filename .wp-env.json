@@ -1,0 +1,16 @@
+{
+	"core": null,
+	"port": 8892,
+	"testsPort": 8893,
+	"plugins": [
+		".",
+		"https://github.com/GlotPress/GlotPress/archive/refs/heads/develop.zip"
+	],
+	"config": {
+		"GP_URL_BASE": "/"
+	},
+	"lifecycleScripts": {
+		"afterStart": "npx @wordpress/env run cli wp rewrite structure '/%postname%/' --hard && npx @wordpress/env run cli wp option update gpoai_base_url 'http://127.0.0.1:11434' && npx @wordpress/env run cli wp eval-file /var/www/html/wp-content/plugins/gp-translate-with-openai/bin/setup-sample-data.php",
+		"afterSetup": "npx @wordpress/env run wordpress -- bash -c 'cd /var/www/html/wp-content/plugins/gp-translate-with-openai && composer install --no-dev'"
+	}
+}

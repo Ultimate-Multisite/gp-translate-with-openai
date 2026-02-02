@@ -46,9 +46,9 @@ class Api {
 	 *
 	 * @param bool $force_refresh Force a refresh from the API.
 	 *
-	 * @return array Array of model IDs.
+	 * @return array|\WP_Error Array of model IDs or WP_Error on failure.
 	 */
-	public static function get_available_models( bool $force_refresh = false ): array {
+	public static function get_available_models( bool $force_refresh = false ) {
 		// Generate cache key based on current configuration.
 		$base_url  = Config::get_base_url();
 		$api_key   = Config::get_api_key();
@@ -62,23 +62,24 @@ class Api {
 			}
 		}
 
-		// If no API key, return defaults.
-		if ( empty( $api_key ) ) {
+		// If no API key and no custom base URL, return defaults.
+		// Custom endpoints (e.g. Ollama) may not require an API key.
+		if ( empty( $api_key ) && empty( $base_url ) ) {
 			return self::DEFAULT_MODELS;
 		}
 
 		// Fetch from API.
-		$models = self::fetch_models_from_api( $api_key, $base_url );
+		$result = self::fetch_models_from_api( $api_key, $base_url );
 
-		// If fetch failed, return defaults.
-		if ( empty( $models ) ) {
-			return self::DEFAULT_MODELS;
+		// If fetch failed, return the error.
+		if ( is_wp_error( $result ) ) {
+			return $result;
 		}
 
 		// Cache the results.
-		set_transient( $cache_key, $models, self::CACHE_EXPIRY );
+		set_transient( $cache_key, $result, self::CACHE_EXPIRY );
 
-		return $models;
+		return $result;
 	}
 
 	/**
@@ -87,10 +88,11 @@ class Api {
 	 * @param string $api_key  The API key.
 	 * @param string $base_url The base URL (empty for default OpenAI).
 	 *
-	 * @return array Array of model IDs.
+	 * @return array|\WP_Error Array of model IDs or WP_Error on failure.
 	 */
-	protected static function fetch_models_from_api( string $api_key, string $base_url = '' ): array {
-		$openai = new OpenAi( $api_key );
+	protected static function fetch_models_from_api( string $api_key, string $base_url = '' ) {
+		// Use a placeholder key for endpoints that don't require authentication (e.g. Ollama).
+		$openai = new OpenAi( ! empty( $api_key ) ? $api_key : 'ollama' );
 
 		if ( ! empty( $base_url ) ) {
 			$openai->setBaseURL( $base_url );
@@ -100,8 +102,27 @@ class Api {
 			$response = $openai->listModels();
 			$data     = json_decode( $response, true );
 
+			if ( json_last_error() !== JSON_ERROR_NONE ) {
+				return new \WP_Error(
+					'invalid_response',
+					sprintf(
+						/* translators: %s: JSON error message */
+						__( 'Invalid JSON response from API: %s', 'gp-translate-with-openai' ),
+						json_last_error_msg()
+					)
+				);
+			}
+
+			if ( isset( $data['error'] ) ) {
+				$error_msg = is_array( $data['error'] ) ? ( $data['error']['message'] ?? wp_json_encode( $data['error'] ) ) : $data['error'];
+				return new \WP_Error( 'api_error', $error_msg );
+			}
+
 			if ( ! isset( $data['data'] ) || ! is_array( $data['data'] ) ) {
-				return array();
+				return new \WP_Error(
+					'unexpected_response',
+					__( 'Unexpected API response format. The "data" field is missing.', 'gp-translate-with-openai' )
+				);
 			}
 
 			$models = array();
@@ -109,6 +130,10 @@ class Api {
 				if ( isset( $model['id'] ) ) {
 					$models[] = $model['id'];
 				}
+			}
+
+			if ( empty( $models ) ) {
+				return new \WP_Error( 'no_models', __( 'API returned no models.', 'gp-translate-with-openai' ) );
 			}
 
 			// Sort models alphabetically.
@@ -121,7 +146,7 @@ class Api {
 
 			return $models;
 		} catch ( \Exception $e ) {
-			return array();
+			return new \WP_Error( 'connection_failed', $e->getMessage() );
 		}
 	}
 
@@ -193,7 +218,7 @@ class Api {
 	 * @return array{success: bool, message: string, models_count: int}
 	 */
 	public static function test_connection( string $api_key, string $base_url = '' ): array {
-		if ( empty( $api_key ) ) {
+		if ( empty( $api_key ) && empty( $base_url ) ) {
 			return array(
 				'success'      => false,
 				'message'      => __( 'API key is required.', 'gp-translate-with-openai' ),
@@ -203,10 +228,10 @@ class Api {
 
 		$models = self::fetch_models_from_api( $api_key, $base_url );
 
-		if ( empty( $models ) ) {
+		if ( is_wp_error( $models ) ) {
 			return array(
 				'success'      => false,
-				'message'      => __( 'Failed to connect to the API or no models available.', 'gp-translate-with-openai' ),
+				'message'      => $models->get_error_message(),
 				'models_count' => 0,
 			);
 		}

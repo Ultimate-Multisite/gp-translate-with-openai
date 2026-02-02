@@ -61,32 +61,29 @@ class Glossary {
 			return $entries;
 		}
 
-		// Find all translation sets for this locale.
-		$translation_sets = GP::$translation_set->find_many( array( 'locale' => $locale ) );
-		if ( empty( $translation_sets ) ) {
+		// Get the locale-level glossary (project_id = 0).
+		$translation_set = GP::$translation_set->by_project_id_slug_and_locale( 0, 'default', $locale );
+		if ( ! $translation_set ) {
 			return $entries;
 		}
 
-		// Collect entries from all glossaries for this locale.
-		foreach ( $translation_sets as $set ) {
-			$glossary = GP::$glossary->by_set_id( $set->id );
-			if ( ! $glossary ) {
-				continue;
-			}
+		$glossary = GP::$glossary->by_set_id( $translation_set->id );
+		if ( ! $glossary ) {
+			return $entries;
+		}
 
-			$glossary_entries = GP::$glossary_entry->find_many( array( 'glossary_id' => $glossary->id ) );
-			if ( empty( $glossary_entries ) ) {
-				continue;
-			}
+		$glossary_entries = GP::$glossary_entry->find_many( array( 'glossary_id' => $glossary->id ) );
+		if ( empty( $glossary_entries ) ) {
+			return $entries;
+		}
 
-			foreach ( $glossary_entries as $entry ) {
-				$entries[] = array(
-					'term'           => $entry->term,
-					'translation'    => $entry->translation,
-					'part_of_speech' => $entry->part_of_speech,
-					'comment'        => $entry->comment,
-				);
-			}
+		foreach ( $glossary_entries as $entry ) {
+			$entries[] = array(
+				'term'           => $entry->term,
+				'translation'    => $entry->translation,
+				'part_of_speech' => $entry->part_of_speech,
+				'comment'        => $entry->comment,
+			);
 		}
 
 		// Cache the results.
@@ -441,23 +438,21 @@ class Glossary {
 	 * @return GP_Glossary|null The glossary object or null on failure.
 	 */
 	protected static function get_or_create_glossary_for_locale( string $locale ) {
-		// Find translation sets for this locale.
-		$translation_sets = GP::$translation_set->find_many( array( 'locale' => $locale ) );
+		// Use project_id = 0 for locale-level glossary (GlotPress convention).
+		// This is the glossary shown at /languages/{locale}/default/glossary/.
+		$translation_set = GP::$translation_set->by_project_id_slug_and_locale( 0, 'default', $locale );
 
-		if ( empty( $translation_sets ) ) {
+		if ( ! $translation_set ) {
 			return null;
 		}
 
-		// Use the first translation set (typically the main/default one).
-		$translation_set = $translation_sets[0];
-
-		// Check for existing glossary using GlotPress native method.
+		// Check for existing glossary.
 		$glossary = GP::$glossary->by_set_id( $translation_set->id );
 		if ( $glossary ) {
 			return $glossary;
 		}
 
-		// Create a new glossary for this translation set.
+		// Create a new glossary for this locale translation set.
 		return GP::$glossary->create(
 			array(
 				'translation_set_id' => $translation_set->id,

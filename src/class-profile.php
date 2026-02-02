@@ -50,6 +50,9 @@ class Profile {
 
 		// Get available models from API.
 		$models = Api::get_available_models();
+		if ( is_wp_error( $models ) ) {
+			$models = Api::DEFAULT_MODELS;
+		}
 
 		$api_key       = get_user_meta( $user->ID, 'gpoai_api_key', true );
 		$base_url      = get_user_meta( $user->ID, 'gpoai_base_url', true );
