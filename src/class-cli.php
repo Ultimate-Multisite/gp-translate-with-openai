@@ -7,6 +7,7 @@
 
 namespace Meloniq\GpOpenaiTranslate;
 
+use GP;
 use WP_CLI;
 use WP_CLI\Utils;
 
@@ -640,6 +641,242 @@ class CLI {
 				WP_CLI::success( sprintf( 'Imported %d entries for %s.', $result, $locale ) );
 			}
 		}
+	}
+
+	/**
+	 * Translate all untranslated strings across all projects.
+	 *
+	 * By default, schedules batch translation jobs via Action Scheduler.
+	 * Use --sync to translate synchronously in the current process.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--locale=<locale>]
+	 * : Translate only this locale. Can be specified multiple times.
+	 *
+	 * [--project=<project_id>]
+	 * : Translate only this project ID. Can be specified multiple times.
+	 *
+	 * [--all-locales]
+	 * : Translate every translation set found, not just configured automation locales.
+	 *
+	 * [--sync]
+	 * : Translate synchronously instead of scheduling via Action Scheduler.
+	 *
+	 * [--dry-run]
+	 * : Show what would be translated without actually translating.
+	 *
+	 * [--debug-requests]
+	 * : Output the full API request and response for each translation.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     # Schedule translation for all projects and configured locales
+	 *     $ wp gpoai translate_all
+	 *
+	 *     # Translate only German, synchronously
+	 *     $ wp gpoai translate_all --locale=de --sync
+	 *
+	 *     # Dry run to see what would be translated
+	 *     $ wp gpoai translate_all --dry-run
+	 *
+	 *     # Translate all locales for a specific project
+	 *     $ wp gpoai translate_all --project=1 --all-locales
+	 *
+	 * @when after_wp_load
+	 *
+	 * @param array $args       Positional arguments.
+	 * @param array $assoc_args Associative arguments.
+	 *
+	 * @return void
+	 */
+	public function translate_all( $args, $assoc_args ) {
+		$locale_filter   = Utils\get_flag_value( $assoc_args, 'locale', '' );
+		$project_filter  = Utils\get_flag_value( $assoc_args, 'project', '' );
+		$all_locales     = Utils\get_flag_value( $assoc_args, 'all-locales', false );
+		$sync            = Utils\get_flag_value( $assoc_args, 'sync', false );
+		$dry_run         = Utils\get_flag_value( $assoc_args, 'dry-run', false );
+		$debug_requests  = Utils\get_flag_value( $assoc_args, 'debug-requests', false );
+
+		if ( $debug_requests ) {
+			$this->enable_debug();
+		}
+
+		// Get all projects.
+		$projects = Automation::get_projects();
+		if ( empty( $projects ) ) {
+			WP_CLI::error( 'No GlotPress projects found.' );
+		}
+
+		// Filter projects if requested.
+		if ( ! empty( $project_filter ) ) {
+			$project_ids = array_map( 'intval', (array) $project_filter );
+			$projects    = array_filter( $projects, function( $p ) use ( $project_ids ) {
+				return in_array( (int) $p->id, $project_ids, true );
+			} );
+			if ( empty( $projects ) ) {
+				WP_CLI::error( 'No matching projects found.' );
+			}
+		}
+
+		// Determine target locales.
+		$target_locales = array();
+		if ( ! empty( $locale_filter ) ) {
+			$target_locales = (array) $locale_filter;
+		} elseif ( ! $all_locales ) {
+			$target_locales = Config::get_automation_locales();
+			if ( empty( $target_locales ) ) {
+				WP_CLI::error( 'No automation locales configured. Use --locale=<locale> or --all-locales, or configure automation locales in settings.' );
+			}
+		}
+
+		$automation    = new Automation();
+		$total_strings = 0;
+		$total_pairs   = 0;
+
+		foreach ( $projects as $project ) {
+			// Get translation sets for this project.
+			$translation_sets = GP::$translation_set->by_project_id( $project->id );
+			if ( ! $translation_sets ) {
+				continue;
+			}
+
+			// If using specific locales, filter or create translation sets.
+			if ( ! empty( $target_locales ) && ! $all_locales ) {
+				$existing_locale_slugs = wp_list_pluck( $translation_sets, 'locale' );
+				// Only process sets matching target locales.
+				$translation_sets = array_filter( $translation_sets, function( $ts ) use ( $target_locales ) {
+					return in_array( $ts->locale, $target_locales, true );
+				} );
+			}
+
+			foreach ( $translation_sets as $ts ) {
+				if ( ! empty( $target_locales ) && ! in_array( $ts->locale, $target_locales, true ) ) {
+					continue;
+				}
+
+				// Get untranslated count.
+				$untranslated = $this->count_untranslated( $project->id, $ts->id );
+				if ( $untranslated <= 0 ) {
+					continue;
+				}
+
+				$total_strings += $untranslated;
+				++$total_pairs;
+
+				WP_CLI::log( sprintf(
+					'  %s / %s: %d untranslated strings',
+					$project->name,
+					$ts->locale,
+					$untranslated
+				) );
+
+				if ( $dry_run ) {
+					continue;
+				}
+
+				if ( $sync ) {
+					$this->translate_project_sync( $project->id, $ts, $debug_requests );
+				} else {
+					$automation->schedule_project_translation( $project->id, $ts->locale );
+				}
+			}
+		}
+
+		WP_CLI::log( '' );
+
+		if ( $dry_run ) {
+			WP_CLI::success( sprintf(
+				'Dry run complete. Found %d untranslated strings across %d project/locale pairs.',
+				$total_strings,
+				$total_pairs
+			) );
+			return;
+		}
+
+		if ( 0 === $total_pairs ) {
+			WP_CLI::success( 'Nothing to translate. All strings are already translated.' );
+			return;
+		}
+
+		if ( $sync ) {
+			WP_CLI::success( sprintf(
+				'Translated %d strings across %d project/locale pairs.',
+				$total_strings,
+				$total_pairs
+			) );
+		} else {
+			WP_CLI::success( sprintf(
+				'Scheduled translation for %d strings across %d project/locale pairs. Run Action Scheduler to process.',
+				$total_strings,
+				$total_pairs
+			) );
+		}
+	}
+
+	/**
+	 * Count untranslated originals for a project and translation set.
+	 *
+	 * @param int $project_id         The project ID.
+	 * @param int $translation_set_id The translation set ID.
+	 *
+	 * @return int
+	 */
+	protected function count_untranslated( int $project_id, int $translation_set_id ): int {
+		global $wpdb;
+
+		$originals_table    = GP::$original->table;
+		$translations_table = GP::$translation->table;
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$originals_table} o
+				LEFT JOIN {$translations_table} t ON o.id = t.original_id
+					AND t.translation_set_id = %d
+					AND t.status IN ('current', 'waiting', 'fuzzy')
+				WHERE o.project_id = %d
+					AND o.status = '+active'
+					AND t.id IS NULL",
+				$translation_set_id,
+				$project_id
+			)
+		);
+	}
+
+	/**
+	 * Translate a project/translation set synchronously with progress output.
+	 *
+	 * @param int    $project_id The project ID.
+	 * @param object $translation_set The translation set object.
+	 * @param bool   $debug Whether debug is enabled.
+	 *
+	 * @return void
+	 */
+	protected function translate_project_sync( int $project_id, $translation_set, bool $debug = false ): void {
+		$automation = new Automation();
+		$reflection = new \ReflectionMethod( $automation, 'get_untranslated_original_ids' );
+		$reflection->setAccessible( true );
+		$original_ids = $reflection->invoke( $automation, $project_id, $translation_set->id );
+
+		if ( empty( $original_ids ) ) {
+			return;
+		}
+
+		$batches  = array_chunk( $original_ids, Automation::BATCH_SIZE );
+		$progress = Utils\make_progress_bar(
+			sprintf( 'Translating %s/%s', $project_id, $translation_set->locale ),
+			count( $original_ids )
+		);
+
+		foreach ( $batches as $batch ) {
+			$automation->process_translation_batch( $project_id, $translation_set->id, $batch );
+			for ( $i = 0; $i < count( $batch ); $i++ ) {
+				$progress->tick();
+			}
+		}
+
+		$progress->finish();
 	}
 
 	/**
