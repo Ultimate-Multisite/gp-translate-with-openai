@@ -659,7 +659,7 @@ class Settings {
 	public function sanitize_max_concurrent( $value ): int {
 		$value = (int) $value;
 
-		return max( 1, min( 20, $value ) );
+		return max( 1, min( 50, $value ) );
 	}
 
 	/**
@@ -672,7 +672,7 @@ class Settings {
 
 		$value = get_option( $field_name, 1 );
 		?>
-		<input type="number" name="<?php echo esc_attr( $field_name ); ?>" id="<?php echo esc_attr( $field_name ); ?>" value="<?php echo esc_attr( $value ); ?>" class="small-text" min="1" max="20">
+		<input type="number" name="<?php echo esc_attr( $field_name ); ?>" id="<?php echo esc_attr( $field_name ); ?>" value="<?php echo esc_attr( $value ); ?>" class="small-text" min="1" max="50">
 		<p class="description"><?php esc_html_e( 'Number of translation requests to send in parallel. Higher values speed up batch operations but increase API load.', 'gp-translate-with-openai' ); ?> <?php esc_html_e( 'Default:', 'gp-translate-with-openai' ); ?> <code>1</code></p>
 		<?php
 	}

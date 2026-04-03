@@ -723,22 +723,50 @@ class Translate {
 	/**
 	 * Cleans up the translation string.
 	 *
+	 * Handles reasoning model output (e.g. DeepSeek) which may include chain-of-thought
+	 * before the actual translation. Strips <think>...</think> blocks and detects
+	 * leaked reasoning by looking for common reasoning phrases, falling back to the
+	 * last non-empty paragraph as the actual translation.
+	 *
 	 * @param string $text The string to clean.
 	 *
 	 * @return string
 	 */
 	protected function clean_translation( $text ) {
+		// Strip <think>...</think> blocks emitted by reasoning models (e.g. DeepSeek-R1).
+		$text = preg_replace( '/<think>.*?<\/think>/si', '', $text );
+		$text = trim( $text );
+
+		// Detect leaked reasoning: if the text contains common reasoning phrases,
+		// extract only the last non-empty paragraph as the actual translation.
+		$reasoning_pattern = '/\b(I need to translate|Let me (translate|break|think|analyze|consider)|'
+			. 'Step by step|First,? (the|I|let|we)|Now,? (let|I|we)|'
+			. 'The (original|instruction|glossary|sentence|text) (says?|is|has|contains|specifies?)|'
+			. 'In Romanian,|Translate (each|step|the)|'
+			. 'According to the glossary|The glossary (says?|specifies?)|'
+			. 'I (must|should|will|am going to|need to) (translate|use|follow|adhere|stick|proceed|check))\b/i';
+
+		if ( preg_match( $reasoning_pattern, $text ) ) {
+			// Split on double newlines (paragraphs) and take the last non-empty one.
+			$paragraphs = preg_split( '/\n{2,}/', $text );
+			$paragraphs = array_filter( array_map( 'trim', $paragraphs ) );
+			if ( ! empty( $paragraphs ) ) {
+				$text = end( $paragraphs );
+			}
+		}
+
+		// Fix printf placeholders broken by the model inserting spaces (e.g. "% s" -> "%s").
 		$text = preg_replace_callback(
 			'/% (s|d)/i',
 			function ( $m ) { // phpcs:ignore
-				return '"%".strtolower($m[1])';
+				return '%' . strtolower( $m[1] );
 			},
 			$text
 		);
 		$text = preg_replace_callback(
 			'/% (\d+) \$ (s|d)/i',
 			function ( $m ) { // phpcs:ignore
-				return '"%".$m[1]."\\$".strtolower($m[2])';
+				return '%' . $m[1] . '$' . strtolower( $m[2] );
 			},
 			$text
 		);
