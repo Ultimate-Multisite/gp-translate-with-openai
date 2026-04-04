@@ -321,6 +321,207 @@ class Translate {
 	}
 
 	/**
+	 * Maximum number of strings to send in a single batched API request.
+	 *
+	 * @var int
+	 */
+	const BATCH_REQUEST_SIZE = 20;
+
+	/**
+	 * Translate multiple strings in a single API request.
+	 *
+	 * Sends up to BATCH_REQUEST_SIZE strings to the API in one call, asking the model
+	 * to return a JSON object mapping numeric indices to translations. Falls back to
+	 * single-string translation if the batched response cannot be parsed.
+	 *
+	 * @param array  $strings      Array of strings to translate.
+	 * @param string $locale       The locale to translate to.
+	 * @param array  $contexts     Optional array of translator comment contexts, keyed by index.
+	 * @param int    $project_id   Optional project ID (used for glossary context).
+	 *
+	 * @return array Array of translated strings in the same order as input, or originals on failure.
+	 */
+	protected function translate_strings( array $strings, string $locale, array $contexts = array(), int $project_id = 0 ): array {
+		if ( empty( $strings ) || ! Locales::is_supported( $locale ) ) {
+			return $strings;
+		}
+
+		$api_key = Config::get_api_key();
+		$openai  = new OpenAi( ! empty( $api_key ) ? $api_key : 'ollama' );
+
+		$base_url = Config::get_base_url();
+		if ( ! empty( $base_url ) ) {
+			$openai->setBaseURL( $base_url );
+		}
+
+		// Get locale name for the prompt.
+		$locale_name = '';
+		if ( class_exists( 'GP_Locales' ) ) {
+			$locale_obj = GP_Locales::by_slug( $locale );
+			if ( $locale_obj ) {
+				$locale_name = $locale_obj->english_name;
+			}
+		}
+		if ( empty( $locale_name ) ) {
+			$supported_locales = Locales::get_supported_locales();
+			$locale_name       = $supported_locales[ $locale ] ?? $locale;
+		}
+
+		// Build glossary from the union of all matching terms across all strings.
+		$glossary_text = '';
+		if ( Config::get_use_glossary() ) {
+			$all_terms = array();
+			foreach ( $strings as $text ) {
+				$matching = Glossary::find_matching_terms( $text, $locale );
+				if ( ! empty( $matching ) ) {
+					foreach ( $matching as $term ) {
+						// Deduplicate by source term.
+						$key = $term['term'] ?? $term['source'] ?? '';
+						if ( ! empty( $key ) ) {
+							$all_terms[ $key ] = $term;
+						}
+					}
+				}
+			}
+			if ( ! empty( $all_terms ) ) {
+				$glossary_text = Glossary::format_for_prompt( array_values( $all_terms ) );
+			}
+		}
+
+		// Build per-string context annotations.
+		$context_parts = array();
+		foreach ( $contexts as $index => $ctx ) {
+			if ( ! empty( $ctx ) && isset( $strings[ $index ] ) ) {
+				$context_parts[] = sprintf( 'String %d context: %s.', $index, $ctx );
+			}
+		}
+		$context_text = implode( ' ', $context_parts );
+
+		// Build locale instructions.
+		$locale_instructions = Config::get_locale_instructions( $locale );
+
+		// Build system prompt — neighboring strings omitted since the batch itself provides context.
+		$system_prompt = Config::get_system_prompt();
+		$system_prompt = str_replace(
+			array( '{SOURCE_LANGUAGE}', '{TARGET_LANGUAGE}', '{CONTEXT}', '{GLOSSARY}', '{LOCALE_INSTRUCTIONS}', '{NEIGHBORING_STRINGS}' ),
+			array( 'English', $locale_name, $context_text, $glossary_text, $locale_instructions, '' ),
+			$system_prompt
+		);
+		$system_prompt = preg_replace( '/\s+/', ' ', trim( $system_prompt ) );
+
+		// Append batch-specific instructions to the system prompt.
+		$system_prompt .= ' You will receive multiple numbered strings to translate. '
+			. 'Return ONLY a JSON object mapping each number to its translation. '
+			. 'Example: {"0": "translated text", "1": "another translation"}. '
+			. 'Do not include any explanation, markdown formatting, or code blocks.';
+
+		// Build the numbered user message.
+		$lines = array();
+		foreach ( $strings as $index => $text ) {
+			$lines[] = sprintf( '%d: %s', $index, $text );
+		}
+		$user_message = implode( "\n", $lines );
+
+		// Scale max_tokens proportionally to the number of strings.
+		$max_tokens = min( 4096, 200 * count( $strings ) );
+
+		$request = array(
+			'model'             => Config::get_model(),
+			'messages'          => array(
+				array(
+					'role'    => 'system',
+					'content' => $system_prompt,
+				),
+				array(
+					'role'    => 'user',
+					'content' => $user_message,
+				),
+			),
+			'temperature'       => Config::get_temperature(),
+			'max_tokens'        => $max_tokens,
+			'frequency_penalty' => 0,
+			'presence_penalty'  => 0,
+		);
+
+		self::debug( 'BATCH_REQUEST', array(
+			'string_count' => count( $strings ),
+			'max_tokens'   => $max_tokens,
+			'body'         => $request,
+		) );
+
+		try {
+			$chat     = $openai->chat( $request );
+			$response = json_decode( $chat );
+		} catch ( \Exception $e ) {
+			self::debug( 'BATCH_ERROR', $e->getMessage() );
+			return $strings;
+		}
+
+		self::debug( 'BATCH_RESPONSE', array(
+			'raw'    => $chat,
+			'parsed' => $response,
+		) );
+
+		// Check for API error.
+		if ( isset( $response->error ) ) {
+			self::debug( 'BATCH_ERROR', array(
+				'code'    => $response->error->code ?? 'unknown',
+				'message' => $response->error->message ?? 'Unknown error',
+			) );
+			return $strings;
+		}
+
+		// Validate response structure.
+		if ( ! $response || ! isset( $response->choices[0]->message->content ) ) {
+			self::debug( 'BATCH_ERROR', 'Invalid response structure' );
+			return $strings;
+		}
+
+		$content = trim( $response->choices[0]->message->content );
+
+		// Strip markdown code fences if present.
+		$content = preg_replace( '/^```(?:json)?\s*/i', '', $content );
+		$content = preg_replace( '/\s*```$/', '', $content );
+
+		$parsed = json_decode( $content, true );
+
+		self::debug( 'BATCH_PARSED', $parsed );
+
+		if ( ! is_array( $parsed ) ) {
+			self::debug( 'BATCH_ERROR', 'Failed to parse JSON response, falling back to single-string translation' );
+			// Fallback: translate each string individually.
+			$fallback = array();
+			foreach ( $strings as $index => $text ) {
+				$ctx        = $contexts[ $index ] ?? '';
+				$fallback[] = $this->translate( $text, $locale, $ctx );
+			}
+			return $fallback;
+		}
+
+		// Map parsed results back to the original indices.
+		$results = array();
+		foreach ( $strings as $index => $text ) {
+			$key = (string) $index;
+			if ( isset( $parsed[ $key ] ) && ! empty( $parsed[ $key ] ) ) {
+				$results[] = (string) $parsed[ $key ];
+			} else {
+				// If a specific string is missing from the response, translate it individually.
+				self::debug( 'BATCH_MISSING', sprintf( 'Index %d missing from batch response, translating individually', $index ) );
+				$ctx       = $contexts[ $index ] ?? '';
+				$results[] = $this->translate( $text, $locale, $ctx );
+			}
+		}
+
+		self::debug( 'BATCH_RESULT', array(
+			'input_count'  => count( $strings ),
+			'output_count' => count( $results ),
+			'usage'        => $response->usage ?? null,
+		) );
+
+		return $results;
+	}
+
+	/**
 	 * Build the request payload for a single translation.
 	 *
 	 * @param string  $text         The text to translate.
@@ -484,9 +685,14 @@ class Translate {
 	/**
 	 * This function is used to bulk translate a set of strings using OpenAI.
 	 *
-	 * @param string $locale The locale to translate to.
-	 * @param array  $strings The strings to translate.
-	 * @param array  $contexts The contexts for each string.
+	 * Strings are batched into groups of BATCH_REQUEST_SIZE and sent as a single API
+	 * request per group. This reduces API calls by up to 20x compared to per-string requests.
+	 *
+	 * @param string $locale      The locale to translate to.
+	 * @param array  $strings     The strings to translate.
+	 * @param array  $contexts    The contexts for each string.
+	 * @param array  $original_ids The original IDs for each string.
+	 * @param int    $project_id  The project ID.
 	 *
 	 * @return array|WP_Error The translated strings or an error.
 	 */
@@ -495,61 +701,50 @@ class Translate {
 			return new WP_Error( 'gpoai_translate', sprintf( "The locale %s isn't supported by OpenAI.", $locale ) );
 		}
 
-		// If we don't have any strings, throw an error.
 		if ( count( $strings ) === 0 ) {
 			return new WP_Error( 'gpoai_translate', 'No strings found to translate.' );
 		}
 
-		// If we have too many strings, throw an error.
 		if ( count( $strings ) > 50 ) {
 			return new WP_Error( 'gpoai_translate', 'Only 50 strings allowed.' );
 		}
 
-		$max_concurrent = Config::get_max_concurrent_requests();
+		// Split strings into chunks of BATCH_REQUEST_SIZE and translate each chunk
+		// in a single API request.
+		$translated_strings = array();
+		$chunks             = array_chunk( $strings, self::BATCH_REQUEST_SIZE, true );
 
-		if ( $max_concurrent <= 1 || ! function_exists( 'curl_multi_init' ) ) {
-			// Sequential fallback.
-			$translated_strings = array();
-			foreach ( $strings as $index => $string ) {
-				$context              = $contexts[ $index ] ?? '';
-				$orig_id              = $original_ids[ $index ] ?? 0;
-				$translated_strings[] = $this->translate( $string, $locale, $context, (int) $orig_id, (int) $project_id );
-			}
-		} else {
-			// Build all payloads.
-			$payloads = array();
-			foreach ( $strings as $index => $text ) {
-				$orig_id = $original_ids[ $index ] ?? 0;
-				$payload = $this->build_request_payload( $text, $locale, $contexts[ $index ] ?? '', (int) $orig_id, (int) $project_id );
-				if ( null === $payload ) {
-					$payloads[ $index ] = null;
-				} else {
-					$payloads[ $index ] = $payload;
+		foreach ( $chunks as $chunk ) {
+			// Build contexts subset for this chunk.
+			$chunk_contexts = array();
+			foreach ( array_keys( $chunk ) as $index ) {
+				if ( isset( $contexts[ $index ] ) && ! empty( $contexts[ $index ] ) ) {
+					$chunk_contexts[ $index ] = $contexts[ $index ];
 				}
 			}
 
-			// Separate valid payloads from nulls.
-			$valid_payloads = array_filter( $payloads, function( $p ) {
-				return null !== $p;
-			} );
-
-			// Execute in chunks.
-			$translated_strings = array();
-			foreach ( $strings as $index => $text ) {
-				$translated_strings[ $index ] = $text; // Default to original.
-			}
-
-			foreach ( array_chunk( $valid_payloads, $max_concurrent, true ) as $chunk ) {
-				$chunk_results = $this->execute_concurrent_requests( $chunk );
-				foreach ( $chunk_results as $index => $translation ) {
-					$translated_strings[ $index ] = $translation;
+			// Re-index the chunk to 0-based for translate_strings().
+			$chunk_values   = array_values( $chunk );
+			$chunk_keys     = array_keys( $chunk );
+			$reindexed_ctxs = array();
+			foreach ( $chunk_contexts as $orig_index => $ctx ) {
+				$new_index = array_search( $orig_index, $chunk_keys, true );
+				if ( false !== $new_index ) {
+					$reindexed_ctxs[ $new_index ] = $ctx;
 				}
 			}
 
-			// Re-index to sequential array.
-			ksort( $translated_strings );
-			$translated_strings = array_values( $translated_strings );
+			$chunk_results = $this->translate_strings( $chunk_values, $locale, $reindexed_ctxs, (int) $project_id );
+
+			// Map results back to original indices.
+			foreach ( $chunk_keys as $position => $original_index ) {
+				$translated_strings[ $original_index ] = $chunk_results[ $position ] ?? $strings[ $original_index ];
+			}
 		}
+
+		// Re-index to sequential array.
+		ksort( $translated_strings );
+		$translated_strings = array_values( $translated_strings );
 
 		// Merge the originals and translations arrays.
 		$items = gp_array_zip( $strings, $translated_strings );

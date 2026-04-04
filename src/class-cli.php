@@ -176,13 +176,22 @@ class CLI {
 		WP_CLI::log( sprintf( 'Fetched %d strings. Starting translation test...', count( $strings ) ) );
 		WP_CLI::log( '' );
 
-		// Process translations.
-		$results   = array();
-		$translate = Translate::instance();
-		$progress  = Utils\make_progress_bar( 'Translating', count( $strings ) );
+		// Process translations using batched API requests.
+		$translate    = Translate::instance();
+		$source_texts = array_column( $strings, 'source' );
 
+		WP_CLI::log( sprintf( 'Translating %d strings in batched API requests...', count( $source_texts ) ) );
+
+		$ai_translations = $translate->translate_batch( $locale, $source_texts );
+
+		if ( is_wp_error( $ai_translations ) ) {
+			$this->restore_config( $original_config );
+			WP_CLI::error( $ai_translations->get_error_message() );
+		}
+
+		$results = array();
 		foreach ( $strings as $index => $string ) {
-			$ai_translation = $translate->translate( $string['source'], $locale );
+			$ai_translation = $ai_translations[ $index ] ?? '';
 			$similarity     = $this->calculate_similarity( $string['translation'], $ai_translation );
 
 			$results[] = array(
@@ -197,11 +206,9 @@ class CLI {
 				'_human'     => $string['translation'],
 				'_ai'        => $ai_translation,
 			);
-
-			$progress->tick();
 		}
 
-		$progress->finish();
+		WP_CLI::log( 'Translation complete.' );
 
 		// Restore original config.
 		$this->restore_config( $original_config );

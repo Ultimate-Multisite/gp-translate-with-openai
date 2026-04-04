@@ -60,8 +60,8 @@ Lifecycle scripts handle setup automatically on start:
 ### Core Classes (in `src/`)
 
 - **Config** — Settings hierarchy: per-user settings override global. Manages API key, model, temperature, system prompt (with template placeholders: `{SOURCE_LANGUAGE}`, `{TARGET_LANGUAGE}`, `{LOCALE_INSTRUCTIONS}`, `{GLOSSARY}`, `{NEIGHBORING_STRINGS}`, `{CONTEXT}`).
-- **Translate** — Singleton. Core translation engine. Sends strings to OpenAI with neighboring strings context, glossary terms, and locale instructions. Handles single and batch translation.
-- **Automation** — Hooks GlotPress import events, schedules batch translation jobs via Action Scheduler (group: `gpoai_automation`, hook: `gpoai_translate_batch`, batch size: 10).
+- **Translate** — Singleton. Core translation engine. `translate()` handles single strings; `translate_strings()` batches up to 20 strings into a single API request using numbered JSON format (reduces API calls ~20x). `translate_batch()` / `openai_translate_batch()` orchestrate chunking. Glossary terms are unioned across all strings in a batch. Falls back to per-string translation if JSON parsing fails.
+- **Automation** — Hooks GlotPress import events, schedules batch translation jobs via Action Scheduler (group: `gpoai_automation`, hook: `gpoai_translate_batch`, batch size: 10). `process_translation_batch()` collects singular originals and translates them via `translate_batch()` (batched API calls), while plural strings are still translated individually.
 - **Glossary** — Fetches GlotPress glossary entries (cached 24h via transients), matches terms in source text, formats for LLM prompt context.
 - **Locale_Instructions** — Hardcoded translation guidelines for ~12 locales (es, de, fr, it, hu, zh, ko, ar, pt, tr, sv, ru).
 - **Quality_Test** — Admin UI + AJAX for comparing plugin translations against wordpress.org human translations. Tracks similarity %, exact matches, duration, tokens.
@@ -75,6 +75,7 @@ Lifecycle scripts handle setup automatically on start:
 
 - **User/global config hierarchy** — Config class checks user meta before falling back to global options.
 - **Singleton** — Translate class uses `instance()`.
+- **Batched API requests** — `translate_strings()` sends up to `BATCH_REQUEST_SIZE` (20) strings per API call. The user message contains numbered strings; the model returns a JSON object mapping indices to translations. Glossary terms are unioned across all strings. Neighboring strings are omitted (the batch itself provides context). Falls back to per-string `translate()` on parse failure.
 - **Transient caching** — Models (1h), glossary entries (24h).
 - **Action Scheduler** — Async batch processing for automation.
 - **Debug callback** — Translate accepts a debug callback for CLI/logging output.
