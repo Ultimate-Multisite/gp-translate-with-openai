@@ -44,6 +44,20 @@ To set if for a specific user, go to the users profile and scroll down to the "G
 Note, if both a global and user API key are set, the user API key will override the global API key.
 
 
+= Local Development =
+
+The plugin includes a `wp-env` configuration for local development with Docker.
+
+Prerequisites: Node.js, Docker.
+
+	1. Clone the repository
+	2. Run `composer install`
+	3. Run `npx @wordpress/env start`
+	4. Visit http://localhost:8892 (login: admin / password)
+	5. GlotPress is available at http://localhost:8892/projects/
+
+A sample project with Spanish, German, and French translation sets is created automatically. The environment is pre-configured to use a local Ollama instance at `http://127.0.0.1:11434` as the API base URL — update `.wp-env.json` to change this.
+
 == Changelog ==
 
 = 1.1 =

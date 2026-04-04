@@ -44,20 +44,39 @@ function setup() {
 	// https://github.com/orhanerday/open-ai .
 	require_once trailingslashit( __DIR__ ) . 'vendor/autoload.php';
 
+	// Load Action Scheduler bootstrap (not autoloaded by Composer).
+	$action_scheduler_file = trailingslashit( __DIR__ ) . 'vendor/woocommerce/action-scheduler/action-scheduler.php';
+	if ( file_exists( $action_scheduler_file ) ) {
+		require_once $action_scheduler_file;
+	}
+
 	require_once trailingslashit( __DIR__ ) . 'src/class-config.php';
 	require_once trailingslashit( __DIR__ ) . 'src/class-locales.php';
+	require_once trailingslashit( __DIR__ ) . 'src/class-api.php';
+	require_once trailingslashit( __DIR__ ) . 'src/class-glossary.php';
+	require_once trailingslashit( __DIR__ ) . 'src/class-locale-instructions.php';
 	require_once trailingslashit( __DIR__ ) . 'src/class-translate.php';
+	require_once trailingslashit( __DIR__ ) . 'src/class-automation.php';
 
 	require_once trailingslashit( __DIR__ ) . 'src/class-admin-page.php';
 	require_once trailingslashit( __DIR__ ) . 'src/class-settings.php';
 	require_once trailingslashit( __DIR__ ) . 'src/class-profile.php';
 	require_once trailingslashit( __DIR__ ) . 'src/class-frontend.php';
 	require_once trailingslashit( __DIR__ ) . 'src/class-ajax.php';
+	require_once trailingslashit( __DIR__ ) . 'src/class-quality-test.php';
 
-	$gpoai_translate['admin-page'] = new Admin_Page();
-	$gpoai_translate['settings']   = new Settings();
-	$gpoai_translate['profile']    = new Profile();
-	$gpoai_translate['frontend']   = new Frontend();
-	$gpoai_translate['ajax']       = new Ajax();
+	$gpoai_translate['admin-page']    = new Admin_Page();
+	$gpoai_translate['settings']      = new Settings();
+	$gpoai_translate['profile']       = new Profile();
+	$gpoai_translate['frontend']      = new Frontend();
+	$gpoai_translate['ajax']          = new Ajax();
+	$gpoai_translate['automation']    = new Automation();
+	$gpoai_translate['quality-test']  = new Quality_Test();
+
+	// Register WP-CLI commands.
+	if ( defined( 'WP_CLI' ) && WP_CLI ) {
+		require_once trailingslashit( __DIR__ ) . 'src/class-cli.php';
+		\WP_CLI::add_command( 'gpoai', CLI::class );
+	}
 }
 add_action( 'after_setup_theme', 'Meloniq\GpOpenaiTranslate\setup' );

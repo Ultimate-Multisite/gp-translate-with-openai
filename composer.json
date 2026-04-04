@@ -8,8 +8,10 @@
             "email": "meloniq@gmail.com"
         }
     ],
+    "type": "wordpress-plugin",
     "minimum-stability": "stable",
     "require": {
-        "orhanerday/open-ai": "^5.3"
+        "orhanerday/open-ai": "^5.3",
+        "woocommerce/action-scheduler": "^3.6"
     }
 }
