@@ -127,30 +127,21 @@ class CLI {
 
 		$count = max( 1, min( 500, $count ) );
 
-		// Store original config.
-		$original_config = array(
-			'model'        => get_option( 'gpoai_model' ),
-			'prompt'       => get_option( 'gpoai_custom_prompt' ),
-			'base_url'     => get_option( 'gpoai_base_url' ),
-			'api_key'      => get_option( 'gpoai_api_key' ),
-			'use_glossary' => get_option( 'gpoai_use_glossary' ),
-		);
-
-		// Apply overrides.
+		// Apply runtime overrides (bypasses object cache).
 		if ( ! empty( $model ) ) {
-			update_option( 'gpoai_model', $model );
+			Config::set_override( 'gpoai_model', $model );
 		}
 		if ( ! empty( $prompt ) ) {
-			update_option( 'gpoai_custom_prompt', $prompt );
+			Config::set_override( 'gpoai_custom_prompt', $prompt );
 		}
 		if ( ! empty( $base_url ) ) {
-			update_option( 'gpoai_base_url', $base_url );
+			Config::set_override( 'gpoai_base_url', $base_url );
 		}
 		if ( ! empty( $api_key ) ) {
-			update_option( 'gpoai_api_key', $api_key );
+			Config::set_override( 'gpoai_api_key', $api_key );
 		}
 		if ( $no_glossary ) {
-			update_option( 'gpoai_use_glossary', false );
+			Config::set_override( 'gpoai_use_glossary', false );
 		}
 
 		// Show configuration.
@@ -169,7 +160,7 @@ class CLI {
 		$strings      = $this->fetch_test_strings( $locale, $count );
 
 		if ( empty( $strings ) ) {
-			$this->restore_config( $original_config );
+			$this->restore_config();
 			WP_CLI::error( 'Could not fetch test strings from WordPress.org.' );
 		}
 
@@ -185,7 +176,7 @@ class CLI {
 		$ai_translations = $translate->translate_batch( $locale, $source_texts );
 
 		if ( is_wp_error( $ai_translations ) ) {
-			$this->restore_config( $original_config );
+			$this->restore_config();
 			WP_CLI::error( $ai_translations->get_error_message() );
 		}
 
@@ -211,7 +202,7 @@ class CLI {
 		WP_CLI::log( 'Translation complete.' );
 
 		// Restore original config.
-		$this->restore_config( $original_config );
+		$this->restore_config();
 
 		// Calculate summary.
 		$exact_matches   = count( array_filter( $results, fn( $r ) => $r['match'] === 'YES' ) );
@@ -323,15 +314,12 @@ class CLI {
 			$this->enable_debug();
 		}
 
-		// Store and apply overrides.
-		$original_base_url = get_option( 'gpoai_base_url' );
-		$original_api_key  = get_option( 'gpoai_api_key' );
-
+		// Apply runtime overrides (bypasses object cache).
 		if ( ! empty( $base_url ) ) {
-			update_option( 'gpoai_base_url', $base_url );
+			Config::set_override( 'gpoai_base_url', $base_url );
 		}
 		if ( ! empty( $api_key ) ) {
-			update_option( 'gpoai_api_key', $api_key );
+			Config::set_override( 'gpoai_api_key', $api_key );
 		}
 
 		// Clear cache and fetch models.
@@ -339,8 +327,7 @@ class CLI {
 		$models = Api::get_available_models( true );
 
 		// Restore config.
-		update_option( 'gpoai_base_url', $original_base_url );
-		update_option( 'gpoai_api_key', $original_api_key );
+		$this->restore_config();
 
 		if ( is_wp_error( $models ) ) {
 			WP_CLI::error( 'Could not fetch models: ' . $models->get_error_message() );
@@ -408,29 +395,22 @@ class CLI {
 			$this->enable_debug();
 		}
 
-		// Store original config.
-		$original_config = array(
-			'model'    => get_option( 'gpoai_model' ),
-			'base_url' => get_option( 'gpoai_base_url' ),
-			'api_key'  => get_option( 'gpoai_api_key' ),
-		);
-
-		// Apply overrides.
+		// Apply runtime overrides (bypasses object cache).
 		if ( ! empty( $model ) ) {
-			update_option( 'gpoai_model', $model );
+			Config::set_override( 'gpoai_model', $model );
 		}
 		if ( ! empty( $base_url ) ) {
-			update_option( 'gpoai_base_url', $base_url );
+			Config::set_override( 'gpoai_base_url', $base_url );
 		}
 		if ( ! empty( $api_key ) ) {
-			update_option( 'gpoai_api_key', $api_key );
+			Config::set_override( 'gpoai_api_key', $api_key );
 		}
 
 		$translator  = Translate::instance();
 		$translation = $translator->translate( $text, $locale );
 
 		// Restore config.
-		$this->restore_config( $original_config );
+		$this->restore_config();
 
 		WP_CLI::log( $translation );
 	}
@@ -893,9 +873,7 @@ class CLI {
 	 *
 	 * @return void
 	 */
-	protected function restore_config( array $config ): void {
-		foreach ( $config as $key => $value ) {
-			update_option( 'gpoai_' . $key, $value );
-		}
+	protected function restore_config(): void {
+		Config::clear_overrides();
 	}
 }

@@ -13,11 +13,59 @@ namespace Meloniq\GpOpenaiTranslate;
 class Config {
 
 	/**
+	 * Runtime overrides that bypass get_option() and user meta.
+	 *
+	 * Used by WP-CLI to set temporary config values that take effect
+	 * immediately, avoiding stale object cache issues.
+	 *
+	 * @var array
+	 */
+	private static array $overrides = array();
+
+	/**
+	 * Set a runtime override for a config key.
+	 *
+	 * @param string $key   The option name (e.g. 'gpoai_model', 'gpoai_base_url').
+	 * @param mixed  $value The override value.
+	 *
+	 * @return void
+	 */
+	public static function set_override( string $key, $value ): void {
+		self::$overrides[ $key ] = $value;
+	}
+
+	/**
+	 * Clear all runtime overrides.
+	 *
+	 * @return void
+	 */
+	public static function clear_overrides(): void {
+		self::$overrides = array();
+	}
+
+	/**
+	 * Get a runtime override value, or null if not set.
+	 *
+	 * @param string $key The option name.
+	 *
+	 * @return mixed|null The override value, or null if not overridden.
+	 */
+	private static function get_override( string $key ) {
+		return self::$overrides[ $key ] ?? null;
+	}
+
+	/**
 	 * Get API key.
 	 *
 	 * @return string
 	 */
 	public static function get_api_key(): string {
+		// Runtime override has highest priority.
+		$override = self::get_override( 'gpoai_api_key' );
+		if ( null !== $override ) {
+			return (string) $override;
+		}
+
 		// User API key has priority.
 		if ( self::get_user_api_key() ) {
 			return self::get_user_api_key();
@@ -52,6 +100,12 @@ class Config {
 	 * @return string
 	 */
 	public static function get_model(): string {
+		// Runtime override has highest priority.
+		$override = self::get_override( 'gpoai_model' );
+		if ( null !== $override ) {
+			return (string) $override;
+		}
+
 		// User model has priority.
 		if ( self::get_user_model() ) {
 			return self::get_user_model();
@@ -137,6 +191,12 @@ Neighboring strings from the same project for context: {NEIGHBORING_STRINGS}
 	 * @return string
 	 */
 	public static function get_system_prompt(): string {
+		// Runtime override has highest priority.
+		$override = self::get_override( 'gpoai_custom_prompt' );
+		if ( null !== $override ) {
+			return (string) $override;
+		}
+
 		// User prompt has priority.
 		$user_prompt = self::get_user_system_prompt();
 		if ( ! empty( $user_prompt ) ) {
@@ -222,6 +282,12 @@ Neighboring strings from the same project for context: {NEIGHBORING_STRINGS}
 	 * @return string
 	 */
 	public static function get_base_url(): string {
+		// Runtime override has highest priority.
+		$override = self::get_override( 'gpoai_base_url' );
+		if ( null !== $override ) {
+			return (string) $override;
+		}
+
 		// User base URL has priority.
 		$user_base_url = self::get_user_base_url();
 		if ( ! empty( $user_base_url ) ) {
@@ -257,6 +323,11 @@ Neighboring strings from the same project for context: {NEIGHBORING_STRINGS}
 	 * @return bool
 	 */
 	public static function get_use_glossary(): bool {
+		$override = self::get_override( 'gpoai_use_glossary' );
+		if ( null !== $override ) {
+			return (bool) $override;
+		}
+
 		return (bool) get_option( 'gpoai_use_glossary', true );
 	}
 
