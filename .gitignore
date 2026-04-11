@@ -33,3 +33,5 @@ node_modules/
 
 .phpunit.result.cache
 .agents/loop-state/
+
+.aidevops.json
