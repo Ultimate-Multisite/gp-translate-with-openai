@@ -55,7 +55,33 @@ class Glossary {
 			return $entries;
 		}
 
-		// Get the locale object from GlotPress.
+		$entries = self::load_glossary_entries_for_slug( $locale );
+
+		// Fallback: if locale has no glossary (or it's empty), try the parent
+		// region. E.g., pt-br falls back to pt, zh-cn to zh, es-mx to es.
+		if ( empty( $entries ) ) {
+			$parent = self::get_parent_locale( $locale );
+			if ( $parent && $parent !== $locale ) {
+				$entries = self::load_glossary_entries_for_slug( $parent );
+			}
+		}
+
+		// Cache the results (even empty, to avoid repeated lookups).
+		set_transient( $cache_key, $entries, self::CACHE_EXPIRY );
+
+		return $entries;
+	}
+
+	/**
+	 * Load raw glossary entries for a GlotPress locale slug.
+	 *
+	 * @param string $locale The GlotPress locale slug.
+	 *
+	 * @return array Array of glossary entry arrays.
+	 */
+	protected static function load_glossary_entries_for_slug( string $locale ): array {
+		$entries = array();
+
 		$locale_obj = GP_Locales::by_slug( $locale );
 		if ( ! $locale_obj ) {
 			return $entries;
@@ -86,10 +112,30 @@ class Glossary {
 			);
 		}
 
-		// Cache the results.
-		set_transient( $cache_key, $entries, self::CACHE_EXPIRY );
-
 		return $entries;
+	}
+
+	/**
+	 * Get the parent locale slug for a regional variant.
+	 *
+	 * E.g., pt-br => pt, zh-cn => zh, es-mx => es, fr-ca => fr.
+	 * Returns null if already a base locale or no parent exists.
+	 *
+	 * @param string $locale The locale slug.
+	 *
+	 * @return string|null The parent locale slug, or null.
+	 */
+	protected static function get_parent_locale( string $locale ): ?string {
+		// If the slug contains a hyphen, the part before it is the candidate parent.
+		if ( strpos( $locale, '-' ) !== false ) {
+			$parent = explode( '-', $locale )[0];
+			// Verify parent exists in GlotPress.
+			if ( GP_Locales::by_slug( $parent ) ) {
+				return $parent;
+			}
+		}
+
+		return null;
 	}
 
 	/**
@@ -177,6 +223,11 @@ class Glossary {
 		// Require GlotPress.
 		if ( ! class_exists( 'GP' ) || ! class_exists( 'GP_Glossary' ) || ! class_exists( 'GP_Glossary_Entry' ) ) {
 			return -1;
+		}
+
+		// Validate locale exists in GlotPress locale database.
+		if ( ! GP_Locales::by_slug( $locale ) ) {
+			return -2; // Locale not in GlotPress.
 		}
 
 		// Find or create a glossary for this locale.
@@ -445,6 +496,16 @@ class Glossary {
 	 * @return GP_Glossary|null The glossary object or null on failure.
 	 */
 	protected static function get_or_create_glossary_for_locale( string $locale ) {
+		// Validate locale exists in GlotPress before proceeding.
+		// GlotPress's by_project_id_slug_and_locale() auto-creates translation sets
+		// for project_id=0, using GP_Locales::by_slug()->english_name for the name.
+		// If the locale doesn't exist in GP's locale DB, that triggers a null property
+		// access and a failed DB insert with NULL name.
+		$locale_obj = GP_Locales::by_slug( $locale );
+		if ( ! $locale_obj || empty( $locale_obj->english_name ) ) {
+			return null;
+		}
+
 		// Use project_id = 0 for locale-level glossary (GlotPress convention).
 		// This is the glossary shown at /languages/{locale}/default/glossary/.
 		$translation_set = GP::$translation_set->by_project_id_slug_and_locale( 0, 'default', $locale );

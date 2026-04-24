@@ -577,7 +577,7 @@ class CLI {
 	 *
 	 * ## OPTIONS
 	 *
-	 * <locale>
+	 * [<locale>]
 	 * : The locale to import glossary for (e.g., de, fr, es).
 	 *
 	 * [--all]
@@ -614,19 +614,30 @@ class CLI {
 			$locales = array( $locale );
 		}
 
+		$total_imported = 0;
+		$total_skipped  = 0;
+
 		foreach ( $locales as $locale ) {
 			$locale_name = Locales::get_supported_locales()[ $locale ] ?? $locale;
 			WP_CLI::log( sprintf( 'Importing glossary for %s (%s)...', $locale_name, $locale ) );
 
 			$result = Glossary::import_from_wporg( $locale );
 
-			if ( -1 === $result ) {
+			if ( -2 === $result ) {
+				WP_CLI::log( sprintf( '  Skipped %s — locale slug not in GlotPress locale database.', $locale ) );
+				++$total_skipped;
+			} elseif ( -1 === $result ) {
 				WP_CLI::warning( sprintf( 'Failed to import glossary for %s. GlotPress glossary classes not available.', $locale ) );
 			} elseif ( 0 === $result ) {
-				WP_CLI::log( sprintf( '  No entries found for %s.', $locale ) );
+				WP_CLI::log( sprintf( '  No entries found for %s on WordPress.org.', $locale ) );
 			} else {
 				WP_CLI::success( sprintf( 'Imported %d entries for %s.', $result, $locale ) );
+				$total_imported += $result;
 			}
+		}
+
+		if ( $import_all ) {
+			WP_CLI::log( sprintf( "\nTotal: %d entries imported, %d locales skipped.", $total_imported, $total_skipped ) );
 		}
 	}
 

@@ -52,6 +52,13 @@ class Automation {
 	const HOOK_SYNC_HUMAN = 'gpoai_sync_human_translations';
 
 	/**
+	 * Hook name for daily glossary re-import.
+	 *
+	 * @var string
+	 */
+	const HOOK_SYNC_GLOSSARIES = 'gpoai_sync_glossaries';
+
+	/**
 	 * Register WordPress hooks.
 	 *
 	 * @return void
@@ -70,8 +77,12 @@ class Automation {
 		// wordpress.org, replacing AI translations where humans have caught up.
 		add_action( self::HOOK_SYNC_HUMAN, array( __CLASS__, 'run_scheduled_human_sync' ) );
 
-		// Ensure the daily sync is scheduled.
+		// Daily glossary re-import from wordpress.org.
+		add_action( self::HOOK_SYNC_GLOSSARIES, array( __CLASS__, 'run_scheduled_glossary_sync' ) );
+
+		// Ensure the daily syncs are scheduled.
 		add_action( 'init', array( $this, 'ensure_human_sync_scheduled' ), 10 );
+		add_action( 'init', array( $this, 'ensure_glossary_sync_scheduled' ), 10 );
 	}
 
 	/**
@@ -86,6 +97,52 @@ class Automation {
 
 		if ( false === as_next_scheduled_action( self::HOOK_SYNC_HUMAN, array(), self::GROUP_NAME ) ) {
 			as_schedule_recurring_action( time() + HOUR_IN_SECONDS, DAY_IN_SECONDS, self::HOOK_SYNC_HUMAN, array(), self::GROUP_NAME );
+		}
+	}
+
+	/**
+	 * Ensure the daily glossary sync is scheduled.
+	 *
+	 * @return void
+	 */
+	public function ensure_glossary_sync_scheduled(): void {
+		if ( ! function_exists( 'as_next_scheduled_action' ) ) {
+			return;
+		}
+
+		if ( false === as_next_scheduled_action( self::HOOK_SYNC_GLOSSARIES, array(), self::GROUP_NAME ) ) {
+			// Offset by 2 hours from human sync to spread load.
+			as_schedule_recurring_action( time() + ( 2 * HOUR_IN_SECONDS ), DAY_IN_SECONDS, self::HOOK_SYNC_GLOSSARIES, array(), self::GROUP_NAME );
+		}
+	}
+
+	/**
+	 * Run the scheduled glossary sync.
+	 *
+	 * Called by Action Scheduler daily. Re-imports glossary entries from
+	 * wordpress.org for all locales that have a glossary in GlotPress.
+	 *
+	 * @return void
+	 */
+	public static function run_scheduled_glossary_sync(): void {
+		if ( ! class_exists( 'GP' ) ) {
+			return;
+		}
+
+		$locales  = array_keys( Locales::get_supported_locales() );
+		$imported = 0;
+		$updated  = 0;
+
+		foreach ( $locales as $locale ) {
+			$result = Glossary::import_from_wporg( $locale );
+			if ( $result > 0 ) {
+				$imported += $result;
+				++$updated;
+			}
+		}
+
+		if ( $imported > 0 ) {
+			error_log( sprintf( '[gpoai] Glossary sync: imported %d entries across %d locales.', $imported, $updated ) );
 		}
 	}
 
