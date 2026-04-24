@@ -508,58 +508,10 @@ class Automation {
 	 * @return int Number of human translations imported.
 	 */
 	public static function import_wporg_translations( object $project, object $translation_set, string $textdomain, string $wp_locale ): int {
-		$url = "https://downloads.wordpress.org/translation/plugin/{$textdomain}/stable/{$wp_locale}.zip";
-
-		$response = wp_remote_get( $url, array( 'timeout' => 30 ) );
-
-		if ( is_wp_error( $response ) || wp_remote_retrieve_response_code( $response ) !== 200 ) {
+		$po = self::download_and_parse_wporg_po( $textdomain, $wp_locale );
+		if ( ! $po ) {
 			return 0; // No official translation available.
 		}
-
-		$zip_content = wp_remote_retrieve_body( $response );
-		if ( empty( $zip_content ) ) {
-			return 0;
-		}
-
-		// Write zip to temp file and extract the .po file.
-		$tmp_zip = get_temp_dir() . $textdomain . '-' . $wp_locale . '-human.zip';
-		file_put_contents( $tmp_zip, $zip_content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
-
-		$zip = new \ZipArchive();
-		if ( true !== $zip->open( $tmp_zip ) ) {
-			wp_delete_file( $tmp_zip );
-			return 0;
-		}
-
-		$po_content = null;
-		for ( $i = 0; $i < $zip->numFiles; $i++ ) {
-			$name = $zip->getNameIndex( $i );
-			if ( substr( $name, -3 ) === '.po' ) {
-				$po_content = $zip->getFromIndex( $i );
-				break;
-			}
-		}
-		$zip->close();
-		wp_delete_file( $tmp_zip );
-
-		if ( empty( $po_content ) ) {
-			return 0;
-		}
-
-		// Write .po to temp file for PO parser.
-		$tmp_po = get_temp_dir() . $textdomain . '-' . $wp_locale . '-human.po';
-		file_put_contents( $tmp_po, $po_content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
-
-		if ( ! class_exists( 'PO' ) ) {
-			require_once ABSPATH . WPINC . '/pomo/po.php';
-		}
-
-		$po = new \PO();
-		if ( ! $po->import_from_file( $tmp_po ) ) {
-			wp_delete_file( $tmp_po );
-			return 0;
-		}
-		wp_delete_file( $tmp_po );
 
 		// Import into GlotPress.
 		$imported = 0;
@@ -697,56 +649,10 @@ class Automation {
 	 * @return int Number of AI translations replaced with human ones.
 	 */
 	public static function replace_ai_with_human( object $project, object $translation_set, string $textdomain, string $wp_locale ): int {
-		$url = "https://downloads.wordpress.org/translation/plugin/{$textdomain}/stable/{$wp_locale}.zip";
-
-		$response = wp_remote_get( $url, array( 'timeout' => 30 ) );
-
-		if ( is_wp_error( $response ) || wp_remote_retrieve_response_code( $response ) !== 200 ) {
+		$po = self::download_and_parse_wporg_po( $textdomain, $wp_locale );
+		if ( ! $po ) {
 			return 0;
 		}
-
-		$zip_content = wp_remote_retrieve_body( $response );
-		if ( empty( $zip_content ) ) {
-			return 0;
-		}
-
-		$tmp_zip = get_temp_dir() . $textdomain . '-' . $wp_locale . '-sync.zip';
-		file_put_contents( $tmp_zip, $zip_content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
-
-		$zip = new \ZipArchive();
-		if ( true !== $zip->open( $tmp_zip ) ) {
-			wp_delete_file( $tmp_zip );
-			return 0;
-		}
-
-		$po_content = null;
-		for ( $i = 0; $i < $zip->numFiles; $i++ ) {
-			$name = $zip->getNameIndex( $i );
-			if ( substr( $name, -3 ) === '.po' ) {
-				$po_content = $zip->getFromIndex( $i );
-				break;
-			}
-		}
-		$zip->close();
-		wp_delete_file( $tmp_zip );
-
-		if ( empty( $po_content ) ) {
-			return 0;
-		}
-
-		$tmp_po = get_temp_dir() . $textdomain . '-' . $wp_locale . '-sync.po';
-		file_put_contents( $tmp_po, $po_content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
-
-		if ( ! class_exists( 'PO' ) ) {
-			require_once ABSPATH . WPINC . '/pomo/po.php';
-		}
-
-		$po = new \PO();
-		if ( ! $po->import_from_file( $tmp_po ) ) {
-			wp_delete_file( $tmp_po );
-			return 0;
-		}
-		wp_delete_file( $tmp_po );
 
 		$replaced = 0;
 		foreach ( $po->entries as $entry ) {
@@ -802,6 +708,102 @@ class Automation {
 		}
 
 		return $replaced;
+	}
+
+	/**
+	 * Download and parse a .po file from wordpress.org for a plugin and locale.
+	 *
+	 * Queries the wordpress.org translations API to find the correct download
+	 * URL (which requires the exact plugin version, not "stable"), downloads
+	 * the zip, extracts the .po, and returns a parsed PO object.
+	 *
+	 * @param string $textdomain Plugin textdomain (slug).
+	 * @param string $wp_locale  WordPress locale (e.g. 'ro_RO').
+	 *
+	 * @return \PO|null Parsed PO object, or null on failure.
+	 */
+	protected static function download_and_parse_wporg_po( string $textdomain, string $wp_locale ): ?\PO {
+		// Query the translations API to get the correct package URL.
+		// The download URL requires the exact version (e.g. /1.11.2/ro_RO.zip),
+		// NOT /stable/ — wordpress.org returns 404 for /stable/.
+		$api_url  = "https://api.wordpress.org/translations/plugins/1.0/?slug={$textdomain}";
+		$api_resp = wp_remote_get( $api_url, array( 'timeout' => 15 ) );
+
+		if ( is_wp_error( $api_resp ) || wp_remote_retrieve_response_code( $api_resp ) !== 200 ) {
+			return null;
+		}
+
+		$api_data = json_decode( wp_remote_retrieve_body( $api_resp ), true );
+		if ( empty( $api_data['translations'] ) ) {
+			return null;
+		}
+
+		// Find the package URL for the requested locale.
+		$package_url = null;
+		foreach ( $api_data['translations'] as $entry ) {
+			if ( ( $entry['language'] ?? '' ) === $wp_locale && ! empty( $entry['package'] ) ) {
+				$package_url = $entry['package'];
+				break;
+			}
+		}
+
+		if ( ! $package_url ) {
+			return null; // No translation available for this locale.
+		}
+
+		// Download the translation zip.
+		$response = wp_remote_get( $package_url, array( 'timeout' => 30 ) );
+
+		if ( is_wp_error( $response ) || wp_remote_retrieve_response_code( $response ) !== 200 ) {
+			return null;
+		}
+
+		$zip_content = wp_remote_retrieve_body( $response );
+		if ( empty( $zip_content ) ) {
+			return null;
+		}
+
+		// Write zip to temp file and extract the .po file.
+		$tmp_zip = get_temp_dir() . $textdomain . '-' . $wp_locale . '-wporg.zip';
+		file_put_contents( $tmp_zip, $zip_content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+
+		$zip = new \ZipArchive();
+		if ( true !== $zip->open( $tmp_zip ) ) {
+			wp_delete_file( $tmp_zip );
+			return null;
+		}
+
+		$po_content = null;
+		for ( $i = 0; $i < $zip->numFiles; $i++ ) {
+			$name = $zip->getNameIndex( $i );
+			if ( substr( $name, -3 ) === '.po' ) {
+				$po_content = $zip->getFromIndex( $i );
+				break;
+			}
+		}
+		$zip->close();
+		wp_delete_file( $tmp_zip );
+
+		if ( empty( $po_content ) ) {
+			return null;
+		}
+
+		// Write .po to temp file for PO parser.
+		$tmp_po = get_temp_dir() . $textdomain . '-' . $wp_locale . '-wporg.po';
+		file_put_contents( $tmp_po, $po_content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+
+		if ( ! class_exists( 'PO' ) ) {
+			require_once ABSPATH . WPINC . '/pomo/po.php';
+		}
+
+		$po = new \PO();
+		if ( ! $po->import_from_file( $tmp_po ) ) {
+			wp_delete_file( $tmp_po );
+			return null;
+		}
+		wp_delete_file( $tmp_po );
+
+		return $po;
 	}
 
 	/**
