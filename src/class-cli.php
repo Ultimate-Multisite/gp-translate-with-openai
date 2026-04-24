@@ -867,6 +867,162 @@ class CLI {
 	}
 
 	/**
+	 * Sync human translations from wordpress.org for existing GlotPress projects.
+	 *
+	 * Downloads official translations and either imports new ones or replaces
+	 * AI-generated translations (user_id = 0) with human translations when
+	 * they become available. Human translations are always preferred over AI.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--locale=<locale>]
+	 * : Only sync this WordPress locale (e.g., ro_RO, fr_FR). Syncs all locales if omitted.
+	 *
+	 * [--dry-run]
+	 * : Show what would be synced without making changes.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     # Sync human translations for all projects and locales
+	 *     $ wp gpoai sync_human
+	 *
+	 *     # Sync only Romanian translations
+	 *     $ wp gpoai sync_human --locale=ro_RO
+	 *
+	 *     # Dry run to see what would be synced
+	 *     $ wp gpoai sync_human --dry-run
+	 *
+	 * @when after_wp_load
+	 *
+	 * @param array $args       Positional arguments.
+	 * @param array $assoc_args Associative arguments.
+	 *
+	 * @return void
+	 */
+	public function sync_human( $args, $assoc_args ) {
+		$locale  = Utils\get_flag_value( $assoc_args, 'locale', '' );
+		$dry_run = Utils\get_flag_value( $assoc_args, 'dry-run', false );
+
+		$projects = Automation::get_projects();
+		if ( empty( $projects ) ) {
+			WP_CLI::error( 'No GlotPress projects found.' );
+		}
+
+		$total_imported = 0;
+		$total_replaced = 0;
+		$sets_checked   = 0;
+
+		foreach ( $projects as $project ) {
+			// Only process plugin projects (path starts with 'plugins/').
+			if ( strpos( $project->path, 'plugins/' ) !== 0 ) {
+				continue;
+			}
+
+			$textdomain = $project->slug;
+			$translation_sets = GP::$translation_set->by_project_id( $project->id );
+
+			if ( empty( $translation_sets ) ) {
+				continue;
+			}
+
+			foreach ( $translation_sets as $ts ) {
+				$locale_obj = \GP_Locales::by_slug( $ts->locale );
+				if ( ! $locale_obj || empty( $locale_obj->wp_locale ) ) {
+					continue;
+				}
+
+				$wp_locale = $locale_obj->wp_locale;
+
+				// If limiting to a specific locale, skip others.
+				if ( ! empty( $locale ) && $wp_locale !== $locale ) {
+					continue;
+				}
+
+				++$sets_checked;
+
+				if ( $dry_run ) {
+					// Count how many AI translations exist.
+					$ai_count = $this->count_ai_translations( $project->id, $ts->id );
+					WP_CLI::log( sprintf(
+						'  %s / %s (%s): %d AI-translated strings to check',
+						$project->name,
+						$ts->locale,
+						$wp_locale,
+						$ai_count
+					) );
+					continue;
+				}
+
+				WP_CLI::log( sprintf( 'Syncing %s / %s (%s)...', $project->name, $ts->locale, $wp_locale ) );
+
+				$replaced = Automation::replace_ai_with_human( $project, $ts, $textdomain, $wp_locale );
+				$imported = Automation::import_wporg_translations( $project, $ts, $textdomain, $wp_locale );
+
+				$total_replaced += $replaced;
+				$total_imported += $imported;
+
+				if ( $replaced > 0 || $imported > 0 ) {
+					WP_CLI::log( sprintf( '  Replaced: %d, New imports: %d', $replaced, $imported ) );
+
+					// Regenerate the Traduttore zip package if translations changed.
+					if ( class_exists( '\Required\Traduttore\ZipProvider' ) ) {
+						$zip_provider = new \Required\Traduttore\ZipProvider( $ts );
+						$zip_provider->generate_zip_file();
+						WP_CLI::log( '  Regenerated translation package.' );
+					}
+				} else {
+					WP_CLI::log( '  Already up to date.' );
+				}
+			}
+		}
+
+		WP_CLI::log( '' );
+
+		if ( $dry_run ) {
+			WP_CLI::success( sprintf(
+				'Dry run complete. Checked %d translation sets. Use without --dry-run to sync.',
+				$sets_checked
+			) );
+		} else {
+			WP_CLI::success( sprintf(
+				'Sync complete. Checked %d sets. Replaced %d AI translations with human ones, imported %d new human translations.',
+				$sets_checked,
+				$total_replaced,
+				$total_imported
+			) );
+		}
+	}
+
+	/**
+	 * Count AI-translated strings (user_id = 0) for a project/translation set.
+	 *
+	 * @param int $project_id         The project ID.
+	 * @param int $translation_set_id The translation set ID.
+	 *
+	 * @return int
+	 */
+	protected function count_ai_translations( int $project_id, int $translation_set_id ): int {
+		global $wpdb;
+
+		$originals_table    = GP::$original->table;
+		$translations_table = GP::$translation->table;
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$translations_table} t
+				INNER JOIN {$originals_table} o ON o.id = t.original_id
+				WHERE o.project_id = %d
+					AND t.translation_set_id = %d
+					AND t.status = 'current'
+					AND t.user_id = 0",
+				$project_id,
+				$translation_set_id
+			)
+		);
+	}
+
+	/**
 	 * Restore original config.
 	 *
 	 * @param array $config Original config values.

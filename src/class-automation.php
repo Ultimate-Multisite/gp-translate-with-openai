@@ -45,6 +45,13 @@ class Automation {
 	}
 
 	/**
+	 * Hook name for human translation sync.
+	 *
+	 * @var string
+	 */
+	const HOOK_SYNC_HUMAN = 'gpoai_sync_human_translations';
+
+	/**
 	 * Register WordPress hooks.
 	 *
 	 * @return void
@@ -58,6 +65,50 @@ class Automation {
 
 		// Admin hooks for manual trigger.
 		add_action( 'admin_post_gpoai_manual_translate', array( $this, 'handle_manual_translate' ) );
+
+		// Periodic human translation sync: re-imports human translations from
+		// wordpress.org, replacing AI translations where humans have caught up.
+		add_action( self::HOOK_SYNC_HUMAN, array( __CLASS__, 'run_scheduled_human_sync' ) );
+
+		// Ensure the daily sync is scheduled.
+		add_action( 'init', array( $this, 'ensure_human_sync_scheduled' ), 10 );
+	}
+
+	/**
+	 * Ensure the daily human translation sync is scheduled.
+	 *
+	 * @return void
+	 */
+	public function ensure_human_sync_scheduled(): void {
+		if ( ! function_exists( 'as_next_scheduled_action' ) ) {
+			return;
+		}
+
+		if ( false === as_next_scheduled_action( self::HOOK_SYNC_HUMAN, array(), self::GROUP_NAME ) ) {
+			as_schedule_recurring_action( time() + HOUR_IN_SECONDS, DAY_IN_SECONDS, self::HOOK_SYNC_HUMAN, array(), self::GROUP_NAME );
+		}
+	}
+
+	/**
+	 * Run the scheduled human translation sync.
+	 *
+	 * Called by Action Scheduler daily. Syncs human translations from
+	 * wordpress.org for all existing GlotPress projects.
+	 *
+	 * @return void
+	 */
+	public static function run_scheduled_human_sync(): void {
+		$stats = self::sync_human_translations();
+
+		if ( $stats['replaced'] > 0 || $stats['imported'] > 0 ) {
+			error_log( sprintf(
+				'[gp-openai-translate] Human sync: %d projects, %d sets, %d replaced, %d imported',
+				$stats['projects'],
+				$stats['sets'],
+				$stats['replaced'],
+				$stats['imported']
+			) );
+		}
 	}
 
 	/**
@@ -165,6 +216,16 @@ class Automation {
 
 		$locale    = $translation_set->locale;
 		$translate = Translate::instance();
+
+		// Import existing human translations from wordpress.org before AI translating.
+		// Human translations are always preferred — AI only fills genuine gaps.
+		$project = GP::$project->get( $project_id );
+		if ( $project ) {
+			$textdomain = $project->slug;
+			$locale_obj_for_import = \GP_Locales::by_slug( $locale );
+			$wp_locale = $locale_obj_for_import ? $locale_obj_for_import->wp_locale : $locale;
+			self::import_wporg_translations( $project, $translation_set, $textdomain, $wp_locale );
+		}
 
 		// Get locale plural info.
 		$locale_obj = \GP_Locales::by_slug( $locale );
@@ -426,6 +487,321 @@ class Automation {
 
 		wp_safe_redirect( add_query_arg( 'gpoai_success', 'scheduled', wp_get_referer() ) );
 		exit;
+	}
+
+	/**
+	 * Import existing human translations from wordpress.org into GlotPress.
+	 *
+	 * Downloads the official .po file for the given locale and imports any
+	 * current translations into the GlotPress translation set. This ensures
+	 * AI only fills genuine gaps, not strings already translated by humans.
+	 *
+	 * Human translations are always preferred over AI — if a human translation
+	 * exists, it takes precedence. This method is idempotent: it skips strings
+	 * that already have a 'current' translation in GlotPress.
+	 *
+	 * @param object $project         GlotPress project.
+	 * @param object $translation_set GlotPress translation set.
+	 * @param string $textdomain      Plugin textdomain (slug).
+	 * @param string $wp_locale       WordPress locale (e.g. 'ro_RO', 'fr_FR').
+	 *
+	 * @return int Number of human translations imported.
+	 */
+	public static function import_wporg_translations( object $project, object $translation_set, string $textdomain, string $wp_locale ): int {
+		$url = "https://downloads.wordpress.org/translation/plugin/{$textdomain}/stable/{$wp_locale}.zip";
+
+		$response = wp_remote_get( $url, array( 'timeout' => 30 ) );
+
+		if ( is_wp_error( $response ) || wp_remote_retrieve_response_code( $response ) !== 200 ) {
+			return 0; // No official translation available.
+		}
+
+		$zip_content = wp_remote_retrieve_body( $response );
+		if ( empty( $zip_content ) ) {
+			return 0;
+		}
+
+		// Write zip to temp file and extract the .po file.
+		$tmp_zip = get_temp_dir() . $textdomain . '-' . $wp_locale . '-human.zip';
+		file_put_contents( $tmp_zip, $zip_content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+
+		$zip = new \ZipArchive();
+		if ( true !== $zip->open( $tmp_zip ) ) {
+			wp_delete_file( $tmp_zip );
+			return 0;
+		}
+
+		$po_content = null;
+		for ( $i = 0; $i < $zip->numFiles; $i++ ) {
+			$name = $zip->getNameIndex( $i );
+			if ( substr( $name, -3 ) === '.po' ) {
+				$po_content = $zip->getFromIndex( $i );
+				break;
+			}
+		}
+		$zip->close();
+		wp_delete_file( $tmp_zip );
+
+		if ( empty( $po_content ) ) {
+			return 0;
+		}
+
+		// Write .po to temp file for PO parser.
+		$tmp_po = get_temp_dir() . $textdomain . '-' . $wp_locale . '-human.po';
+		file_put_contents( $tmp_po, $po_content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+
+		if ( ! class_exists( 'PO' ) ) {
+			require_once ABSPATH . WPINC . '/pomo/po.php';
+		}
+
+		$po = new \PO();
+		if ( ! $po->import_from_file( $tmp_po ) ) {
+			wp_delete_file( $tmp_po );
+			return 0;
+		}
+		wp_delete_file( $tmp_po );
+
+		// Import into GlotPress.
+		$imported = 0;
+		foreach ( $po->entries as $entry ) {
+			if ( empty( $entry->translations[0] ) ) {
+				continue;
+			}
+
+			// Find the matching original in GlotPress.
+			$original = GP::$original->find_one(
+				array(
+					'project_id' => $project->id,
+					'singular'   => $entry->singular,
+					'status'     => '+active',
+				)
+			);
+
+			if ( ! $original ) {
+				continue;
+			}
+
+			// Check if already has a current translation.
+			$existing = GP::$translation->find_one(
+				array(
+					'original_id'        => $original->id,
+					'translation_set_id' => $translation_set->id,
+					'status'             => 'current',
+				)
+			);
+
+			if ( $existing ) {
+				continue;
+			}
+
+			$data = array(
+				'original_id'        => $original->id,
+				'translation_set_id' => $translation_set->id,
+				'translation_0'      => $entry->translations[0],
+				'status'             => 'current',
+				'user_id'            => 0,
+			);
+
+			if ( ! empty( $entry->translations[1] ) ) {
+				$data['translation_1'] = $entry->translations[1];
+			}
+
+			GP::$translation->create( $data );
+			++$imported;
+		}
+
+		return $imported;
+	}
+
+	/**
+	 * Sync human translations from wordpress.org for all existing projects.
+	 *
+	 * Iterates all GlotPress projects and their translation sets, re-importing
+	 * human translations from wordpress.org. If a human translation now exists
+	 * for a string that was previously AI-translated (user_id = 0), the AI
+	 * translation is replaced with the human one.
+	 *
+	 * @param string|null $limit_locale Optional: only sync this WP locale (e.g. 'ro_RO').
+	 *
+	 * @return array{projects: int, sets: int, imported: int, replaced: int}
+	 */
+	public static function sync_human_translations( ?string $limit_locale = null ): array {
+		$stats = array(
+			'projects' => 0,
+			'sets'     => 0,
+			'imported' => 0,
+			'replaced' => 0,
+		);
+
+		$projects = self::get_projects();
+		if ( empty( $projects ) ) {
+			return $stats;
+		}
+
+		foreach ( $projects as $project ) {
+			// Only process plugin projects (path starts with 'plugins/').
+			if ( strpos( $project->path, 'plugins/' ) !== 0 ) {
+				continue;
+			}
+
+			$textdomain = $project->slug;
+			$translation_sets = GP::$translation_set->by_project_id( $project->id );
+
+			if ( empty( $translation_sets ) ) {
+				continue;
+			}
+
+			++$stats['projects'];
+
+			foreach ( $translation_sets as $translation_set ) {
+				$locale_obj = \GP_Locales::by_slug( $translation_set->locale );
+				if ( ! $locale_obj || empty( $locale_obj->wp_locale ) ) {
+					continue;
+				}
+
+				$wp_locale = $locale_obj->wp_locale;
+
+				// If limiting to a specific locale, skip others.
+				if ( null !== $limit_locale && $wp_locale !== $limit_locale ) {
+					continue;
+				}
+
+				++$stats['sets'];
+
+				// First, replace any AI-translated strings (user_id = 0) where
+				// a human translation is now available from wp.org.
+				$replaced = self::replace_ai_with_human( $project, $translation_set, $textdomain, $wp_locale );
+				$stats['replaced'] += $replaced;
+
+				// Then import any remaining human translations that are new.
+				$imported = self::import_wporg_translations( $project, $translation_set, $textdomain, $wp_locale );
+				$stats['imported'] += $imported;
+			}
+		}
+
+		return $stats;
+	}
+
+	/**
+	 * Replace AI-translated strings with human translations from wordpress.org.
+	 *
+	 * Finds strings that were AI-translated (user_id = 0) and replaces them
+	 * with human translations when available. This ensures human translations
+	 * always take precedence as they are updated on wordpress.org.
+	 *
+	 * @param object $project         GlotPress project.
+	 * @param object $translation_set GlotPress translation set.
+	 * @param string $textdomain      Plugin textdomain (slug).
+	 * @param string $wp_locale       WordPress locale (e.g. 'ro_RO').
+	 *
+	 * @return int Number of AI translations replaced with human ones.
+	 */
+	public static function replace_ai_with_human( object $project, object $translation_set, string $textdomain, string $wp_locale ): int {
+		$url = "https://downloads.wordpress.org/translation/plugin/{$textdomain}/stable/{$wp_locale}.zip";
+
+		$response = wp_remote_get( $url, array( 'timeout' => 30 ) );
+
+		if ( is_wp_error( $response ) || wp_remote_retrieve_response_code( $response ) !== 200 ) {
+			return 0;
+		}
+
+		$zip_content = wp_remote_retrieve_body( $response );
+		if ( empty( $zip_content ) ) {
+			return 0;
+		}
+
+		$tmp_zip = get_temp_dir() . $textdomain . '-' . $wp_locale . '-sync.zip';
+		file_put_contents( $tmp_zip, $zip_content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+
+		$zip = new \ZipArchive();
+		if ( true !== $zip->open( $tmp_zip ) ) {
+			wp_delete_file( $tmp_zip );
+			return 0;
+		}
+
+		$po_content = null;
+		for ( $i = 0; $i < $zip->numFiles; $i++ ) {
+			$name = $zip->getNameIndex( $i );
+			if ( substr( $name, -3 ) === '.po' ) {
+				$po_content = $zip->getFromIndex( $i );
+				break;
+			}
+		}
+		$zip->close();
+		wp_delete_file( $tmp_zip );
+
+		if ( empty( $po_content ) ) {
+			return 0;
+		}
+
+		$tmp_po = get_temp_dir() . $textdomain . '-' . $wp_locale . '-sync.po';
+		file_put_contents( $tmp_po, $po_content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+
+		if ( ! class_exists( 'PO' ) ) {
+			require_once ABSPATH . WPINC . '/pomo/po.php';
+		}
+
+		$po = new \PO();
+		if ( ! $po->import_from_file( $tmp_po ) ) {
+			wp_delete_file( $tmp_po );
+			return 0;
+		}
+		wp_delete_file( $tmp_po );
+
+		$replaced = 0;
+		foreach ( $po->entries as $entry ) {
+			if ( empty( $entry->translations[0] ) ) {
+				continue;
+			}
+
+			$original = GP::$original->find_one(
+				array(
+					'project_id' => $project->id,
+					'singular'   => $entry->singular,
+					'status'     => '+active',
+				)
+			);
+
+			if ( ! $original ) {
+				continue;
+			}
+
+			// Find current AI translation (user_id = 0 means automated/AI).
+			$existing = GP::$translation->find_one(
+				array(
+					'original_id'        => $original->id,
+					'translation_set_id' => $translation_set->id,
+					'status'             => 'current',
+				)
+			);
+
+			if ( ! $existing ) {
+				continue; // No current translation — import_wporg_translations handles this.
+			}
+
+			// Only replace if the current translation was AI-generated (user_id = 0)
+			// and the human translation differs.
+			if ( (int) $existing->user_id !== 0 ) {
+				continue; // Human-set translation — don't overwrite.
+			}
+
+			if ( $existing->translation_0 === $entry->translations[0] ) {
+				continue; // Same translation — no need to replace.
+			}
+
+			// Replace AI translation with human translation.
+			GP::$translation->update(
+				$existing,
+				array(
+					'translation_0' => $entry->translations[0],
+					'translation_1' => ! empty( $entry->translations[1] ) ? $entry->translations[1] : null,
+					'user_id'       => 0, // Still system-imported, but from human source.
+				)
+			);
+			++$replaced;
+		}
+
+		return $replaced;
 	}
 
 	/**
