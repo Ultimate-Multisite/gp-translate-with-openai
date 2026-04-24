@@ -723,24 +723,21 @@ class Automation {
 	 * @return \PO|null Parsed PO object, or null on failure.
 	 */
 	protected static function download_and_parse_wporg_po( string $textdomain, string $wp_locale ): ?\PO {
-		// Query the translations API to get the correct package URL.
-		// The download URL requires the exact version (e.g. /1.11.2/ro_RO.zip),
-		// NOT /stable/ — wordpress.org returns 404 for /stable/.
-		$api_url  = "https://api.wordpress.org/translations/plugins/1.0/?slug={$textdomain}";
-		$api_resp = wp_remote_get( $api_url, array( 'timeout' => 15 ) );
-
-		if ( is_wp_error( $api_resp ) || wp_remote_retrieve_response_code( $api_resp ) !== 200 ) {
-			return null;
+		// Use WordPress core's translations_api() to get the correct package URL.
+		// This is the same function WordPress uses internally for translation
+		// updates — handles versioning, user agent, and URL construction.
+		if ( ! function_exists( 'translations_api' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/translation-install.php';
 		}
 
-		$api_data = json_decode( wp_remote_retrieve_body( $api_resp ), true );
-		if ( empty( $api_data['translations'] ) ) {
+		$api = translations_api( 'plugins', array( 'slug' => $textdomain ) );
+		if ( is_wp_error( $api ) || empty( $api['translations'] ) ) {
 			return null;
 		}
 
 		// Find the package URL for the requested locale.
 		$package_url = null;
-		foreach ( $api_data['translations'] as $entry ) {
+		foreach ( $api['translations'] as $entry ) {
 			if ( ( $entry['language'] ?? '' ) === $wp_locale && ! empty( $entry['package'] ) ) {
 				$package_url = $entry['package'];
 				break;
