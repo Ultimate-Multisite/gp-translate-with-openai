@@ -39,6 +39,17 @@ class Translate {
 	private static $debug_callback = null;
 
 	/**
+	 * Accumulated token usage across translate_batch/translate_strings calls.
+	 *
+	 * @var array{prompt_tokens: int, completion_tokens: int, total_tokens: int}
+	 */
+	private array $accumulated_usage = [
+		'prompt_tokens'     => 0,
+		'completion_tokens' => 0,
+		'total_tokens'      => 0,
+	];
+
+	/**
 	 * Get the singleton instance.
 	 *
 	 * @return Translate
@@ -62,6 +73,31 @@ class Translate {
 	public static function set_debug( bool $enabled, ?callable $callback = null ): void {
 		self::$debug          = $enabled;
 		self::$debug_callback = $callback;
+	}
+
+	/**
+	 * Get the accumulated token usage since the last reset.
+	 *
+	 * @return array{prompt_tokens: int, completion_tokens: int, total_tokens: int}
+	 */
+	public function get_accumulated_usage(): array {
+		return $this->accumulated_usage;
+	}
+
+	/**
+	 * Reset accumulated token usage counters.
+	 *
+	 * Call this before starting a batch of translations to get accurate
+	 * per-job token counts.
+	 *
+	 * @return void
+	 */
+	public function reset_usage(): void {
+		$this->accumulated_usage = [
+			'prompt_tokens'     => 0,
+			'completion_tokens' => 0,
+			'total_tokens'      => 0,
+		];
 	}
 
 	/**
@@ -510,6 +546,13 @@ class Translate {
 				$ctx       = $contexts[ $index ] ?? '';
 				$results[] = $this->translate( $text, $locale, $ctx );
 			}
+		}
+
+		// Accumulate token usage from this API call.
+		if ( isset( $response->usage ) ) {
+			$this->accumulated_usage['prompt_tokens']     += (int) ( $response->usage->prompt_tokens ?? 0 );
+			$this->accumulated_usage['completion_tokens'] += (int) ( $response->usage->completion_tokens ?? 0 );
+			$this->accumulated_usage['total_tokens']      += (int) ( $response->usage->total_tokens ?? 0 );
 		}
 
 		self::debug( 'BATCH_RESULT', array(
