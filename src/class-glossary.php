@@ -268,6 +268,13 @@ class Glossary {
 			// Use GlotPress native validation.
 			$new_entry = new GP_Glossary_Entry( $entry_data );
 			if ( ! $new_entry->validate() ) {
+				// GlotPress rejects terms that don't start/end with a word character
+				// (e.g., "are you sure...?"). WordPress.org's glossary contains such
+				// entries, so fall back to a direct DB insert for trusted wp.org data.
+				$inserted = self::direct_insert_glossary_entry( $entry_data );
+				if ( $inserted ) {
+					++$imported;
+				}
 				continue;
 			}
 
@@ -505,5 +512,54 @@ class Glossary {
 				'_transient_timeout_' . self::TRANSIENT_PREFIX . '%'
 			)
 		);
+	}
+
+	/**
+	 * Insert a glossary entry directly via $wpdb, bypassing GlotPress validation.
+	 *
+	 * GlotPress's GP_Glossary_Entry::restrict_fields() enforces that terms must
+	 * start and end with a word character. WordPress.org's glossary contains
+	 * legitimate entries like "are you sure...?" that violate this rule. This
+	 * method inserts such entries directly, with a duplicate check.
+	 *
+	 * @param array $entry_data Associative array with glossary_id, term, translation,
+	 *                          part_of_speech, comment, last_edited_by.
+	 *
+	 * @return bool True if inserted, false if duplicate or error.
+	 */
+	protected static function direct_insert_glossary_entry( array $entry_data ): bool {
+		global $wpdb;
+
+		$table = GP::$glossary_entry->table;
+
+		// Duplicate check: same glossary_id + term + part_of_speech.
+		$existing = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT id FROM {$table} WHERE glossary_id = %d AND term = %s AND part_of_speech = %s LIMIT 1",
+				$entry_data['glossary_id'],
+				$entry_data['term'],
+				$entry_data['part_of_speech']
+			)
+		);
+
+		if ( $existing ) {
+			return false;
+		}
+
+		$result = $wpdb->insert(
+			$table,
+			array(
+				'glossary_id'    => $entry_data['glossary_id'],
+				'term'           => $entry_data['term'],
+				'translation'    => $entry_data['translation'],
+				'part_of_speech' => $entry_data['part_of_speech'],
+				'comment'        => $entry_data['comment'],
+				'last_edited_by' => $entry_data['last_edited_by'],
+				'date_modified'  => current_time( 'mysql', true ),
+			),
+			array( '%d', '%s', '%s', '%s', '%s', '%d', '%s' )
+		);
+
+		return false !== $result;
 	}
 }
