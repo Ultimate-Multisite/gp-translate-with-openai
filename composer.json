@@ -13,5 +13,14 @@
     "require": {
         "orhanerday/open-ai": "^5.3",
         "woocommerce/action-scheduler": "^3.6"
+    },
+    "require-dev": {
+        "szepeviktor/phpstan-wordpress": "^2.0",
+        "phpstan/extension-installer": "^1.1"
+    },
+    "config": {
+        "allow-plugins": {
+            "phpstan/extension-installer": true
+        }
     }
 }
