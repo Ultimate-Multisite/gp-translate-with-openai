@@ -243,12 +243,27 @@ class Glossary {
 		}
 
 		// Write to a temp file so we can use fgetcsv like GlotPress does.
-		$tmp_file = wp_tempnam( 'gpoai_glossary_' );
-		file_put_contents( $tmp_file, $csv_content );
+		if ( ! function_exists( 'wp_tempnam' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/file.php';
+		}
+		if ( ! function_exists( 'wp_tempnam' ) ) {
+			return -1;
+		}
+
+		$tmp_file = \wp_tempnam( 'gpoai_glossary_' );
+		if ( ! $tmp_file ) {
+			return -1;
+		}
+
+		if ( false === file_put_contents( $tmp_file, $csv_content ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+			\wp_delete_file( $tmp_file );
+
+			return -1;
+		}
 
 		$imported = self::import_csv_to_glossary( $tmp_file, $glossary->id, $locale );
 
-		unlink( $tmp_file );
+		\wp_delete_file( $tmp_file );
 
 		// Clear cache for this locale.
 		delete_transient( self::TRANSIENT_PREFIX . $locale );
