@@ -36,6 +36,17 @@ class Automation {
 	const BATCH_SIZE = 10;
 
 	/**
+	 * Number of translation sets to process per scheduled human sync action.
+	 *
+	 * The translate site can contain thousands of sets. Processing all of them in
+	 * one Action Scheduler job exceeds the per-job timeout and leaves recurring
+	 * failures behind, so scheduled syncs continue in small batches.
+	 *
+	 * @var int
+	 */
+	const HUMAN_SYNC_BATCH_SIZE = 5;
+
+	/**
 	 * Constructor.
 	 *
 	 * @return void
@@ -75,7 +86,7 @@ class Automation {
 
 		// Periodic human translation sync: re-imports human translations from
 		// wordpress.org, replacing AI translations where humans have caught up.
-		add_action( self::HOOK_SYNC_HUMAN, array( __CLASS__, 'run_scheduled_human_sync' ) );
+		add_action( self::HOOK_SYNC_HUMAN, array( __CLASS__, 'run_scheduled_human_sync' ), 10, 1 );
 
 		// Daily glossary re-import from wordpress.org.
 		add_action( self::HOOK_SYNC_GLOSSARIES, array( __CLASS__, 'run_scheduled_glossary_sync' ) );
@@ -154,16 +165,26 @@ class Automation {
 	 *
 	 * @return void
 	 */
-	public static function run_scheduled_human_sync(): void {
-		$stats = self::sync_human_translations();
+	public static function run_scheduled_human_sync( int $offset = 0 ): void {
+		$stats = self::sync_human_translations( null, $offset, self::HUMAN_SYNC_BATCH_SIZE );
 
-		if ( $stats['replaced'] > 0 || $stats['imported'] > 0 ) {
+		if ( $stats['has_more'] && function_exists( 'as_schedule_single_action' ) && function_exists( 'as_next_scheduled_action' ) ) {
+			$next_args = array( $stats['next_offset'] );
+
+			if ( false === as_next_scheduled_action( self::HOOK_SYNC_HUMAN, $next_args, self::GROUP_NAME ) ) {
+				as_schedule_single_action( time() + MINUTE_IN_SECONDS, self::HOOK_SYNC_HUMAN, $next_args, self::GROUP_NAME );
+			}
+		}
+
+		if ( $stats['replaced'] > 0 || $stats['imported'] > 0 || $stats['has_more'] ) {
 			error_log( sprintf(
-				'[gp-openai-translate] Human sync: %d projects, %d sets, %d replaced, %d imported',
+				'[gp-openai-translate] Human sync: offset %d, %d projects, %d sets, %d replaced, %d imported, has_more=%s',
+				$stats['offset'],
 				$stats['projects'],
 				$stats['sets'],
 				$stats['replaced'],
-				$stats['imported']
+				$stats['imported'],
+				$stats['has_more'] ? 'yes' : 'no'
 			) );
 		}
 	}
@@ -271,7 +292,7 @@ class Automation {
 			return;
 		}
 
-		$locale    = $translation_set->locale;
+		$locale    = (string) $translation_set->locale;
 		$translate = Translate::instance();
 
 		// Import existing human translations from wordpress.org before AI translating.
@@ -279,8 +300,7 @@ class Automation {
 		$project = GP::$project->get( $project_id );
 		if ( $project ) {
 			$textdomain = $project->slug;
-			$locale_obj_for_import = \GP_Locales::by_slug( $locale );
-			$wp_locale = $locale_obj_for_import ? $locale_obj_for_import->wp_locale : $locale;
+			$wp_locale = self::get_wp_locale_for_glotpress_locale( $locale );
 			self::import_wporg_translations( $project, $translation_set, $textdomain, $wp_locale );
 		}
 
@@ -631,21 +651,30 @@ class Automation {
 	 * translation is replaced with the human one.
 	 *
 	 * @param string|null $limit_locale Optional: only sync this WP locale (e.g. 'ro_RO').
+	 * @param int         $offset       Number of eligible sets to skip before processing.
+	 * @param int         $limit        Maximum eligible sets to process in this call.
 	 *
-	 * @return array{projects: int, sets: int, imported: int, replaced: int}
+	 * @return array{projects: int, sets: int, imported: int, replaced: int, offset: int, limit: int, next_offset: int, has_more: bool}
 	 */
-	public static function sync_human_translations( ?string $limit_locale = null ): array {
+	public static function sync_human_translations( ?string $limit_locale = null, int $offset = 0, int $limit = self::HUMAN_SYNC_BATCH_SIZE ): array {
 		$stats = array(
-			'projects' => 0,
-			'sets'     => 0,
-			'imported' => 0,
-			'replaced' => 0,
+			'projects'    => 0,
+			'sets'        => 0,
+			'imported'    => 0,
+			'replaced'    => 0,
+			'offset'      => max( 0, $offset ),
+			'limit'       => max( 1, $limit ),
+			'next_offset' => 0,
+			'has_more'    => false,
 		);
 
 		$projects = self::get_projects();
 		if ( empty( $projects ) ) {
 			return $stats;
 		}
+
+		$eligible_sets_seen = 0;
+		$processed_projects = array();
 
 		foreach ( $projects as $project ) {
 			// Only process plugin projects (path starts with 'plugins/').
@@ -660,8 +689,6 @@ class Automation {
 				continue;
 			}
 
-			++$stats['projects'];
-
 			foreach ( $translation_sets as $translation_set ) {
 				$locale_obj = \GP_Locales::by_slug( $translation_set->locale );
 				if ( ! $locale_obj || empty( $locale_obj->wp_locale ) ) {
@@ -675,7 +702,25 @@ class Automation {
 					continue;
 				}
 
+				if ( $eligible_sets_seen < $stats['offset'] ) {
+					++$eligible_sets_seen;
+					continue;
+				}
+
+				if ( $stats['sets'] >= $stats['limit'] ) {
+					$stats['next_offset'] = $eligible_sets_seen;
+					$stats['has_more']    = true;
+
+					return $stats;
+				}
+
 				++$stats['sets'];
+				++$eligible_sets_seen;
+
+				if ( ! isset( $processed_projects[ $project->id ] ) ) {
+					$processed_projects[ $project->id ] = true;
+					++$stats['projects'];
+				}
 
 				// First, replace any AI-translated strings (user_id = 0) where
 				// a human translation is now available from wp.org.
@@ -688,7 +733,29 @@ class Automation {
 			}
 		}
 
+		$stats['next_offset'] = 0;
+
 		return $stats;
+	}
+
+	/**
+	 * Resolve a GlotPress locale slug to a WordPress locale string.
+	 *
+	 * Some GlotPress locales do not define wp_locale. Falling back to the slug
+	 * keeps wordpress.org import lookups best-effort without passing null to
+	 * methods that require a string.
+	 *
+	 * @param string $locale GlotPress locale slug.
+	 *
+	 * @return string WordPress locale or fallback locale slug.
+	 */
+	protected static function get_wp_locale_for_glotpress_locale( string $locale ): string {
+		$locale_obj = \GP_Locales::by_slug( $locale );
+		if ( $locale_obj && ! empty( $locale_obj->wp_locale ) ) {
+			return (string) $locale_obj->wp_locale;
+		}
+
+		return $locale;
 	}
 
 	/**
