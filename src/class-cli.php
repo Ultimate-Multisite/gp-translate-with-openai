@@ -1005,6 +1005,115 @@ class CLI {
 	}
 
 	/**
+	 * Prune stale failed Action Scheduler rows created by the automation queue.
+	 *
+	 * This is intended for old failure backlogs after the underlying issue has
+	 * been fixed. It deletes matching Action Scheduler logs before deleting the
+	 * failed actions so the dashboard count reflects only current failures.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--hook=<hook>]
+	 * : Action Scheduler hook to prune.
+	 * ---
+	 * default: gpoai_translate_batch
+	 * ---
+	 *
+	 * [--before=<relative-or-date>]
+	 * : Delete failed actions scheduled before this time. Accepts strtotime()
+	 *   values such as "7 days ago" or an absolute date.
+	 * ---
+	 * default: 7 days ago
+	 * ---
+	 *
+	 * [--dry-run]
+	 * : Show the count without deleting rows.
+	 *
+	 * [--yes]
+	 * : Required to delete rows when --dry-run is not set.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     # Show stale failed translation batch rows older than a week.
+	 *     $ wp gpoai prune_failed_actions --dry-run
+	 *
+	 *     # Delete stale failed translation batch rows older than a week.
+	 *     $ wp gpoai prune_failed_actions --yes
+	 *
+	 * @when after_wp_load
+	 *
+	 * @param array $args       Positional arguments.
+	 * @param array $assoc_args Associative arguments.
+	 *
+	 * @return void
+	 */
+	public function prune_failed_actions( $args, $assoc_args ): void {
+		global $wpdb;
+
+		$hook       = (string) Utils\get_flag_value( $assoc_args, 'hook', Automation::HOOK_TRANSLATE_BATCH );
+		$before_arg = (string) Utils\get_flag_value( $assoc_args, 'before', '7 days ago' );
+		$dry_run    = Utils\get_flag_value( $assoc_args, 'dry-run', false );
+		$yes        = Utils\get_flag_value( $assoc_args, 'yes', false );
+		$before_ts  = strtotime( $before_arg );
+
+		if ( false === $before_ts ) {
+			WP_CLI::error( sprintf( 'Invalid --before value: %s', $before_arg ) );
+		}
+
+		if ( ! $dry_run && ! $yes ) {
+			WP_CLI::error( 'Refusing to delete rows without --yes. Use --dry-run to preview.' );
+		}
+
+		$before = gmdate( 'Y-m-d H:i:s', $before_ts );
+		$actions_table = $wpdb->prefix . 'actionscheduler_actions';
+		$logs_table    = $wpdb->prefix . 'actionscheduler_logs';
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$count = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$actions_table} WHERE hook = %s AND status = 'failed' AND scheduled_date_gmt < %s",
+				$hook,
+				$before
+			)
+		);
+
+		if ( $dry_run || 0 === $count ) {
+			WP_CLI::success( sprintf(
+				'Found %d failed %s actions scheduled before %s.',
+				$count,
+				$hook,
+				$before
+			) );
+			return;
+		}
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$wpdb->query(
+			$wpdb->prepare(
+				"DELETE l FROM {$logs_table} l INNER JOIN {$actions_table} a ON a.action_id = l.action_id WHERE a.hook = %s AND a.status = 'failed' AND a.scheduled_date_gmt < %s",
+				$hook,
+				$before
+			)
+		);
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$deleted = (int) $wpdb->query(
+			$wpdb->prepare(
+				"DELETE FROM {$actions_table} WHERE hook = %s AND status = 'failed' AND scheduled_date_gmt < %s",
+				$hook,
+				$before
+			)
+		);
+
+		WP_CLI::success( sprintf(
+			'Deleted %d failed %s actions scheduled before %s.',
+			$deleted,
+			$hook,
+			$before
+		) );
+	}
+
+	/**
 	 * Count AI-translated strings (user_id = 0) for a project/translation set.
 	 *
 	 * @param int $project_id         The project ID.

@@ -261,14 +261,20 @@ class Automation {
 		$delay_step = 60; // 1 minute between batches.
 
 		foreach ( $batches as $batch ) {
+			$args = array(
+				'project_id'         => $project_id,
+				'translation_set_id' => $translation_set->id,
+				'original_ids'       => $batch,
+			);
+
+			if ( function_exists( 'as_next_scheduled_action' ) && false !== as_next_scheduled_action( self::HOOK_TRANSLATE_BATCH, $args, self::GROUP_NAME ) ) {
+				continue;
+			}
+
 			as_schedule_single_action(
 				time() + $delay,
 				self::HOOK_TRANSLATE_BATCH,
-				array(
-					'project_id'         => $project_id,
-					'translation_set_id' => $translation_set->id,
-					'original_ids'       => $batch,
-				),
+				$args,
 				self::GROUP_NAME
 			);
 
