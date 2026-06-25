@@ -44,7 +44,18 @@ class Automation {
 	 *
 	 * @var int
 	 */
-	const HUMAN_SYNC_BATCH_SIZE = 5;
+	const HUMAN_SYNC_BATCH_SIZE = 1;
+
+	/**
+	 * Number of locales to process per scheduled glossary sync action.
+	 *
+	 * Glossary imports can require network downloads and parsing for each locale.
+	 * Keep each Action Scheduler job deliberately small so the queue advances
+	 * without hitting the per-job timeout on the production translate site.
+	 *
+	 * @var int
+	 */
+	const GLOSSARY_SYNC_BATCH_SIZE = 3;
 
 	/**
 	 * Constructor.
@@ -135,16 +146,19 @@ class Automation {
 	 *
 	 * @return void
 	 */
-	public static function run_scheduled_glossary_sync(): void {
+	public static function run_scheduled_glossary_sync( int $offset = 0 ): void {
 		if ( ! class_exists( 'GP' ) ) {
 			return;
 		}
 
 		$locales  = array_keys( Locales::get_supported_locales() );
+		$offset   = max( 0, $offset );
+		$limit    = self::GLOSSARY_SYNC_BATCH_SIZE;
+		$batch    = array_slice( $locales, $offset, $limit );
 		$imported = 0;
 		$updated  = 0;
 
-		foreach ( $locales as $locale ) {
+		foreach ( $batch as $locale ) {
 			$result = Glossary::import_from_wporg( $locale );
 			if ( $result > 0 ) {
 				$imported += $result;
@@ -152,7 +166,18 @@ class Automation {
 			}
 		}
 
-		if ( $imported > 0 ) {
+		$next_offset = $offset + $limit;
+		$has_more    = $next_offset < count( $locales );
+
+		if ( $has_more && function_exists( 'as_schedule_single_action' ) && function_exists( 'as_next_scheduled_action' ) ) {
+			$next_args = array( $next_offset );
+
+			if ( false === as_next_scheduled_action( self::HOOK_SYNC_GLOSSARIES, $next_args, self::GROUP_NAME ) ) {
+				as_schedule_single_action( time() + MINUTE_IN_SECONDS, self::HOOK_SYNC_GLOSSARIES, $next_args, self::GROUP_NAME );
+			}
+		}
+
+		if ( $imported > 0 || $has_more ) {
 			error_log( sprintf( '[gpoai] Glossary sync: imported %d entries across %d locales.', $imported, $updated ) );
 		}
 	}
