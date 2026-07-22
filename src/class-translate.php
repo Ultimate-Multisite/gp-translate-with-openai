@@ -364,32 +364,20 @@ class Translate {
 	const BATCH_REQUEST_SIZE = 20;
 
 	/**
-	 * Translate multiple strings in a single API request.
+	 * Build glossary-aware chat messages for a batch translation request.
 	 *
-	 * Sends up to BATCH_REQUEST_SIZE strings to the API in one call, asking the model
-	 * to return a JSON object mapping numeric indices to translations. Falls back to
-	 * single-string translation if the batched response cannot be parsed.
+	 * External translation providers can reuse this helper to share the same
+	 * locale, context, glossary, and locale-instruction prompt construction as
+	 * gp-openai-translate while sending the request through their own transport.
 	 *
-	 * @param array  $strings      Array of strings to translate.
-	 * @param string $locale       The locale to translate to.
-	 * @param array  $contexts     Optional array of translator comment contexts, keyed by index.
-	 * @param int    $project_id   Optional project ID (used for glossary context).
+	 * @param array  $strings    Array of strings to translate.
+	 * @param string $locale     The locale to translate to.
+	 * @param array  $contexts   Optional array of translator comment contexts, keyed by index.
+	 * @param int    $project_id Optional project ID (used for glossary context).
 	 *
-	 * @return array Array of translated strings in the same order as input, or originals on failure.
+	 * @return array<int,array{role:string,content:string}> OpenAI-compatible chat messages.
 	 */
-	protected function translate_strings( array $strings, string $locale, array $contexts = array(), int $project_id = 0 ): array {
-		if ( empty( $strings ) || ! Locales::is_supported( $locale ) ) {
-			return $strings;
-		}
-
-		$api_key = Config::get_api_key();
-		$openai  = new OpenAi( ! empty( $api_key ) ? $api_key : 'ollama' );
-
-		$base_url = Config::get_base_url();
-		if ( ! empty( $base_url ) ) {
-			$openai->setBaseURL( $base_url );
-		}
-
+	public function build_batch_messages( array $strings, string $locale, array $contexts = array(), int $project_id = 0 ): array {
 		// Get locale name for the prompt.
 		$locale_name = '';
 		if ( class_exists( 'GP_Locales' ) ) {
@@ -456,23 +444,54 @@ class Translate {
 		foreach ( $strings as $index => $text ) {
 			$lines[] = sprintf( '%d: %s', $index, $text );
 		}
-		$user_message = implode( "\n", $lines );
+
+		return array(
+			array(
+				'role'    => 'system',
+				'content' => $system_prompt,
+			),
+			array(
+				'role'    => 'user',
+				'content' => implode( "\n", $lines ),
+			),
+		);
+	}
+
+	/**
+	 * Translate multiple strings in a single API request.
+	 *
+	 * Sends up to BATCH_REQUEST_SIZE strings to the API in one call, asking the model
+	 * to return a JSON object mapping numeric indices to translations. Falls back to
+	 * single-string translation if the batched response cannot be parsed.
+	 *
+	 * @param array  $strings      Array of strings to translate.
+	 * @param string $locale       The locale to translate to.
+	 * @param array  $contexts     Optional array of translator comment contexts, keyed by index.
+	 * @param int    $project_id   Optional project ID (used for glossary context).
+	 *
+	 * @return array Array of translated strings in the same order as input, or originals on failure.
+	 */
+	protected function translate_strings( array $strings, string $locale, array $contexts = array(), int $project_id = 0 ): array {
+		if ( empty( $strings ) || ! Locales::is_supported( $locale ) ) {
+			return $strings;
+		}
+
+		$api_key = Config::get_api_key();
+		$openai  = new OpenAi( ! empty( $api_key ) ? $api_key : 'ollama' );
+
+		$base_url = Config::get_base_url();
+		if ( ! empty( $base_url ) ) {
+			$openai->setBaseURL( $base_url );
+		}
+
+		$messages = $this->build_batch_messages( $strings, $locale, $contexts, $project_id );
 
 		// Scale max_tokens proportionally to the number of strings.
 		$max_tokens = min( 4096, 200 * count( $strings ) );
 
 		$request = array(
 			'model'             => Config::get_model(),
-			'messages'          => array(
-				array(
-					'role'    => 'system',
-					'content' => $system_prompt,
-				),
-				array(
-					'role'    => 'user',
-					'content' => $user_message,
-				),
-			),
+			'messages'          => $messages,
 			'temperature'       => Config::get_temperature(),
 			'max_tokens'        => $max_tokens,
 			'frequency_penalty' => 0,
