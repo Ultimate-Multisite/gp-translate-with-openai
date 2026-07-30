@@ -266,7 +266,7 @@ class Translate {
 		}
 
 		// Build locale instructions replacement.
-		$locale_instructions = Config::get_locale_instructions( $locale );
+		$locale_instructions = $this->build_locale_instructions( $locale, $project_id );
 
 		// Build system prompt from template with placeholder replacement.
 		$system_prompt = $prompt ?? Config::get_system_prompt();
@@ -422,7 +422,7 @@ class Translate {
 		$context_text = implode( ' ', $context_parts );
 
 		// Build locale instructions.
-		$locale_instructions = Config::get_locale_instructions( $locale );
+		$locale_instructions = $this->build_locale_instructions( $locale, $project_id );
 
 		// Build system prompt — neighboring strings omitted since the batch itself provides context.
 		$system_prompt = Config::get_system_prompt();
@@ -548,7 +548,7 @@ class Translate {
 			$fallback = array();
 			foreach ( $strings as $index => $text ) {
 				$ctx        = $contexts[ $index ] ?? '';
-				$fallback[] = $this->translate( $text, $locale, $ctx );
+				$fallback[] = $this->translate( $text, $locale, $ctx, 0, $project_id );
 			}
 			return $fallback;
 		}
@@ -563,7 +563,7 @@ class Translate {
 				// If a specific string is missing from the response, translate it individually.
 				self::debug( 'BATCH_MISSING', sprintf( 'Index %d missing from batch response, translating individually', $index ) );
 				$ctx       = $contexts[ $index ] ?? '';
-				$results[] = $this->translate( $text, $locale, $ctx );
+				$results[] = $this->translate( $text, $locale, $ctx, 0, $project_id );
 			}
 		}
 
@@ -581,6 +581,68 @@ class Translate {
 		) );
 
 		return $results;
+	}
+
+	/**
+	 * Build locale and project-specific prompt instructions.
+	 *
+	 * @param string $locale     The locale to translate to.
+	 * @param int    $project_id Optional GlotPress project ID.
+	 *
+	 * @return string Prompt instructions.
+	 */
+	protected function build_locale_instructions( string $locale, int $project_id = 0 ): string {
+		$instructions = Config::get_locale_instructions( $locale );
+		$brand_rule   = $this->get_project_brand_instruction( $project_id );
+
+		if ( '' === $brand_rule ) {
+			return $instructions;
+		}
+
+		return trim( $instructions . ' ' . $brand_rule );
+	}
+
+	/**
+	 * Get a project-specific plugin name preservation instruction.
+	 *
+	 * GlotPress project names are populated from imported plugin metadata, such as
+	 * the WordPress plugin header's "Plugin Name" value. Use that stored metadata
+	 * instead of reparsing plugin files during translation requests.
+	 *
+	 * @param int $project_id GlotPress project ID.
+	 *
+	 * @return string Prompt instruction, or an empty string when unavailable.
+	 */
+	protected function get_project_brand_instruction( int $project_id ): string {
+		if ( $project_id <= 0 || ! class_exists( 'GP' ) || ! isset( GP::$project ) ) {
+			return '';
+		}
+
+		$project = GP::$project->get( $project_id );
+		if ( ! $project || empty( $project->name ) ) {
+			return '';
+		}
+
+		$plugin_name = html_entity_decode( wp_strip_all_tags( (string) $project->name ), ENT_QUOTES, 'UTF-8' );
+		$plugin_name = preg_replace( '/\s+/', ' ', trim( $plugin_name ) );
+
+		if ( '' === $plugin_name || false !== strpos( $plugin_name, '{{' ) || strlen( $plugin_name ) > 120 ) {
+			return '';
+		}
+
+		if ( ! preg_match( '/[A-Za-z0-9]/', $plugin_name ) ) {
+			return '';
+		}
+
+		$encoded_name = wp_json_encode( $plugin_name, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+		if ( false === $encoded_name ) {
+			return '';
+		}
+
+		return sprintf(
+			'Plugin name rule: when the exact plugin name %1$s appears in the source text, preserve it exactly as %1$s in the translation. Do not translate, reorder, abbreviate, or substitute this plugin name.',
+			$encoded_name
+		);
 	}
 
 	/**
@@ -642,7 +704,7 @@ class Translate {
 		}
 
 		// Build locale instructions replacement.
-		$locale_instructions = Config::get_locale_instructions( $locale );
+		$locale_instructions = $this->build_locale_instructions( $locale, $project_id );
 
 		// Build system prompt from template with placeholder replacement.
 		$system_prompt = $prompt ?? Config::get_system_prompt();
@@ -886,7 +948,7 @@ class Translate {
 		}
 
 		// Build locale instructions.
-		$locale_instructions = Config::get_locale_instructions( $locale );
+		$locale_instructions = $this->build_locale_instructions( $locale, $project_id );
 
 		// Build system prompt.
 		$system_prompt = Config::get_system_prompt();
