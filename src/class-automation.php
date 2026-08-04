@@ -851,18 +851,42 @@ class Automation {
 			}
 
 			// Replace AI translation with human translation.
-			GP::$translation->update(
+			$saved = self::save_human_translation(
 				$existing,
-				array(
-					'translation_0' => $entry->translations[0],
-					'translation_1' => ! empty( $entry->translations[1] ) ? $entry->translations[1] : null,
-					'user_id'       => 0, // Still system-imported, but from human source.
-				)
+				$entry->translations[0],
+				! empty( $entry->translations[1] ) ? $entry->translations[1] : null
 			);
+			if ( ! $saved ) {
+				continue;
+			}
+
 			++$replaced;
 		}
 
 		return $replaced;
+	}
+
+	/**
+	 * Save a human translation over an existing AI translation.
+	 *
+	 * GlotPress translation objects save by their primary key. Calling the
+	 * translation model's update method with the arguments reversed instead
+	 * turns the new translation text into an unindexed WHERE clause.
+	 *
+	 * @param object      $existing Existing GlotPress translation object.
+	 * @param string      $singular Human singular translation.
+	 * @param string|null $plural   Human plural translation, when present.
+	 *
+	 * @return bool Whether GlotPress saved the translation.
+	 */
+	protected static function save_human_translation( object $existing, string $singular, ?string $plural ): bool {
+		return (bool) $existing->save(
+			array(
+				'translation_0' => $singular,
+				'translation_1' => $plural,
+				'user_id'       => 0, // Still system-imported, but from human source.
+			)
+		);
 	}
 
 	/**
