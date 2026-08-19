@@ -7,6 +7,7 @@
  * Tags:              glotpress, translate, machine translate, openai, chatgpt
  *
  * Requires at least: 4.9
+ * Tested up to:     7.1
  * Requires PHP:      7.4
  * Version:           1.1
  *
