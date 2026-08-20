@@ -2,7 +2,7 @@
 Contributors: meloniq
 Tags: glotpress, translate, machine translate, openai, chatgpt
 Tested up to: 7.1
-Stable tag: 1.1
+Stable tag: 1.1.1
 License: GPLv2
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -59,6 +59,10 @@ Prerequisites: Node.js, Docker.
 A sample project with Spanish, German, and French translation sets is created automatically. The environment is pre-configured to use a local Ollama instance at `http://127.0.0.1:11434` as the API base URL — update `.wp-env.json` to change this.
 
 == Changelog ==
+
+= 1.1.1 =
+Version 1.1.1 - Released on 2026-08-19
+- Improved: WordPress compatibility metadata now reflects testing through WordPress 7.1.
 
 = 1.1 =
 * Added support for GPT-5 Mini model.

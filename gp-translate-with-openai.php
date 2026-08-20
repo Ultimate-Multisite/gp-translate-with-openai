@@ -8,7 +8,7 @@
  *
  * Requires at least: 4.9
  * Requires PHP:      7.4
- * Version:           1.1
+ * Version:           1.1.1
  *
  * Author:            MELONIQ.NET
  * Author URI:        https://meloniq.net/
@@ -22,6 +22,10 @@
  */
 
 namespace Meloniq\GpOpenaiTranslate;
+
+if ( ! defined( 'GP_TRANSLATE_WITH_OPENAI_VERSION' ) ) {
+	define( 'GP_TRANSLATE_WITH_OPENAI_VERSION', '1.1.1' );
+}
 
 // If this file is accessed directly, then abort.
 if ( ! defined( 'WPINC' ) ) {
