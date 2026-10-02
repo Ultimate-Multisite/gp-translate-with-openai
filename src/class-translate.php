@@ -888,6 +888,59 @@ class Translate {
 	}
 
 	/**
+	 * Build the glossary-aware plural request shared by both AI transports.
+	 *
+	 * @param string $singular    English singular.
+	 * @param string $plural      English plural.
+	 * @param string $locale      GlotPress locale slug.
+	 * @param int    $nplurals    Required number of translated forms.
+	 * @param string $context     Original context or translator comment.
+	 * @param int    $original_id Original ID for neighboring strings.
+	 * @param int    $project_id  GlotPress project ID.
+	 * @return array<int,array{role:string,content:string}> Chat messages.
+	 */
+	public function build_plural_messages( string $singular, string $plural, string $locale, int $nplurals, string $context = '', int $original_id = 0, int $project_id = 0 ): array {
+		$locale_obj  = class_exists( 'GP_Locales' ) ? GP_Locales::by_slug( $locale ) : null;
+		$locale_name = $locale_obj ? $locale_obj->english_name : ( Locales::get_supported_locales()[ $locale ] ?? $locale );
+		$glossary_text = '';
+		if ( Config::get_use_glossary() ) {
+			$matching_terms = Glossary::find_matching_terms( $singular . ' ' . $plural, $locale );
+			$glossary_text  = Glossary::format_for_prompt( $matching_terms );
+		}
+		$context_text = $context ? sprintf( 'Context: %s.', $context ) : '';
+		$neighboring_text = $original_id && $project_id ? $this->get_neighboring_strings( $original_id, $project_id ) : '';
+		$system_prompt = str_replace(
+			array( '{SOURCE_LANGUAGE}', '{TARGET_LANGUAGE}', '{CONTEXT}', '{GLOSSARY}', '{LOCALE_INSTRUCTIONS}', '{NEIGHBORING_STRINGS}' ),
+			array( 'English', $locale_name, $context_text, $glossary_text, $this->build_locale_instructions( $locale, $project_id ), $neighboring_text ),
+			Config::get_system_prompt()
+		);
+		$system_prompt = preg_replace( '/\s+/', ' ', trim( $system_prompt ) );
+		$form_labels = array();
+		$form_examples = array();
+		for ( $i = 0; $i < $nplurals; $i++ ) {
+			$form_labels[] = '"form' . $i . '"';
+			if ( $locale_obj && method_exists( $locale_obj, 'numbers_for_index' ) ) {
+				$form_examples[] = sprintf( 'form%d: %s', $i, implode( ', ', $locale_obj->numbers_for_index( $i ) ) );
+			}
+		}
+		$user_message = sprintf(
+			'Translate this plural string. The English singular is: "%s" and the English plural is: "%s". '
+			. 'This locale requires %d plural forms. Example numbers selecting each form: %s. '
+			. 'Return ONLY a JSON object with keys %s containing each translated plural form. '
+			. 'Preserve the source placeholders in every form. Do not include explanations or markdown.',
+			$singular,
+			$plural,
+			$nplurals,
+			implode( '; ', $form_examples ),
+			implode( ', ', $form_labels )
+		);
+		return array(
+			array( 'role' => 'system', 'content' => $system_prompt ),
+			array( 'role' => 'user', 'content' => $user_message ),
+		);
+	}
+
+	/**
 	 * Translate a plural string, returning all plural forms for the locale.
 	 *
 	 * @param string $singular    The singular form.
@@ -913,79 +966,9 @@ class Translate {
 			$openai->setBaseURL( $base_url );
 		}
 
-		// Get locale name.
-		$locale_name = '';
-		if ( class_exists( 'GP_Locales' ) ) {
-			$locale_obj = GP_Locales::by_slug( $locale );
-			if ( $locale_obj ) {
-				$locale_name = $locale_obj->english_name;
-			}
-		}
-		if ( empty( $locale_name ) ) {
-			$supported_locales = Locales::get_supported_locales();
-			$locale_name       = $supported_locales[ $locale ] ?? $locale;
-		}
-
-		// Build glossary.
-		$glossary_text = '';
-		if ( Config::get_use_glossary() ) {
-			$matching_terms = Glossary::find_matching_terms( $singular . ' ' . $plural, $locale );
-			if ( ! empty( $matching_terms ) ) {
-				$glossary_text = Glossary::format_for_prompt( $matching_terms );
-			}
-		}
-
-		// Build context.
-		$context_text = '';
-		if ( ! empty( $context ) ) {
-			$context_text = sprintf( 'Context: %s.', $context );
-		}
-
-		// Build neighboring strings.
-		$neighboring_text = '';
-		if ( $original_id && $project_id ) {
-			$neighboring_text = $this->get_neighboring_strings( $original_id, $project_id );
-		}
-
-		// Build locale instructions.
-		$locale_instructions = $this->build_locale_instructions( $locale, $project_id );
-
-		// Build system prompt.
-		$system_prompt = Config::get_system_prompt();
-		$system_prompt = str_replace(
-			array( '{SOURCE_LANGUAGE}', '{TARGET_LANGUAGE}', '{CONTEXT}', '{GLOSSARY}', '{LOCALE_INSTRUCTIONS}', '{NEIGHBORING_STRINGS}' ),
-			array( 'English', $locale_name, $context_text, $glossary_text, $locale_instructions, $neighboring_text ),
-			$system_prompt
-		);
-		$system_prompt = preg_replace( '/\s+/', ' ', trim( $system_prompt ) );
-
-		// Build plural-specific user message.
-		$form_labels = array();
-		for ( $i = 0; $i < $nplurals; $i++ ) {
-			$form_labels[] = 'form' . $i;
-		}
-		$user_message = sprintf(
-			"Translate this plural string. The English singular is: \"%s\" and the English plural is: \"%s\". " .
-			"This locale requires %d plural forms. Return ONLY a JSON object with keys %s containing each translated plural form. " .
-			"Do not include any explanation, markdown formatting, or code blocks — return only the raw JSON object.",
-			$singular,
-			$plural,
-			$nplurals,
-			implode( ', ', array_map( function ( $l ) { return '"' . $l . '"'; }, $form_labels ) )
-		);
-
 		$request = array(
 			'model'             => Config::get_model(),
-			'messages'          => array(
-				array(
-					'role'    => 'system',
-					'content' => $system_prompt,
-				),
-				array(
-					'role'    => 'user',
-					'content' => $user_message,
-				),
-			),
+			'messages'          => $this->build_plural_messages( $singular, $plural, $locale, $nplurals, $context, $original_id, $project_id ),
 			'temperature'       => Config::get_temperature(),
 			'max_tokens'        => 1000,
 			'frequency_penalty' => 0,
@@ -1006,6 +989,10 @@ class Translate {
 			self::debug( 'PLURAL_ERROR', $response->error ?? 'Invalid response' );
 			return $singular;
 		}
+
+		$this->accumulated_usage['prompt_tokens']     += (int) ( $response->usage->prompt_tokens ?? 0 );
+		$this->accumulated_usage['completion_tokens'] += (int) ( $response->usage->completion_tokens ?? 0 );
+		$this->accumulated_usage['total_tokens']      += (int) ( $response->usage->total_tokens ?? 0 );
 
 		$content = trim( $response->choices[0]->message->content );
 
