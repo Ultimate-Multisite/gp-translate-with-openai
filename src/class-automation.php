@@ -354,11 +354,11 @@ class Automation {
 				array(
 					'original_id'        => $original_id,
 					'translation_set_id' => $translation_set_id,
-					'status'             => array( 'current', 'waiting', 'fuzzy' ),
+					'status'             => $original->plural ? 'current' : array( 'current', 'waiting', 'fuzzy' ),
 				)
 			);
 
-			if ( $existing ) {
+			if ( $existing && ( ! $original->plural || ( 'current' === $existing->status && Human_Translations::complete( Human_Translations::fields( $existing ), (int) $nplurals ) ) ) ) {
 				continue;
 			}
 
@@ -432,6 +432,8 @@ class Automation {
 				continue;
 			}
 
+			$human = Human_Translations::human_forms( $original, $translation_set );
+			$ai = array();
 			$data = array(
 				'original_id'        => $original->id,
 				'translation_set_id' => $translation_set_id,
@@ -440,17 +442,43 @@ class Automation {
 			);
 
 			for ( $i = 0; $i < $nplurals; $i++ ) {
-				$data[ 'translation_' . $i ] = $result[ $i ] ?? '';
+				$field = 'translation_' . $i;
+				$data[ $field ] = $human[ $field ] ?? ( $result[ $i ] ?? '' );
+				if ( ! isset( $human[ $field ] ) ) {
+					$ai[] = $i;
+				}
+			}
+			if ( ! Human_Translations::complete( $data, (int) $nplurals ) ) {
+				continue;
 			}
 
 			$translation_array = array();
 			for ( $i = 0; $i < $nplurals; $i++ ) {
-				$translation_array[] = $result[ $i ] ?? '';
+				$translation_array[] = $data[ 'translation_' . $i ];
 			}
 			$warnings         = GP::$translation_warnings->check( $original->singular, $original->plural, $translation_array, $locale_obj );
 			$data['warnings'] = $warnings;
-
-			GP::$translation->create( $data );
+			$data['status'] = empty( $warnings ) ? 'current' : 'waiting';
+			$current = GP::$translation->find_one( array( 'original_id' => $original->id, 'translation_set_id' => $translation_set_id, 'status' => 'current' ) );
+			if ( $current && Human_Translations::complete( Human_Translations::fields( $current ), (int) $nplurals ) ) {
+				continue;
+			}
+			$demoted = $current && 'current' === $data['status'];
+			if ( $demoted && ! $current->save( array( 'status' => 'old' ) ) ) {
+				continue;
+			}
+			$created = GP::$translation->create( $data );
+			if ( is_object( $created ) ) {
+				if ( ! Human_Translations::record( $created, $human, $ai ) ) {
+					$created->delete();
+					if ( $demoted ) {
+						$current->save( array( 'status' => 'current' ) );
+					}
+				}
+				gp_clean_translation_set_cache( (int) $translation_set_id );
+			} elseif ( $demoted ) {
+				$current->save( array( 'status' => 'current' ) );
+			}
 		}
 	}
 
@@ -624,50 +652,21 @@ class Automation {
 		// Import into GlotPress.
 		$imported = 0;
 		foreach ( $po->entries as $entry ) {
-			if ( empty( $entry->translations[0] ) ) {
+			if ( empty( $entry->translations ) ) {
 				continue;
 			}
 
 			// Find the matching original in GlotPress.
-			$original = GP::$original->find_one(
-				array(
-					'project_id' => $project->id,
-					'singular'   => $entry->singular,
-					'status'     => '+active',
-				)
-			);
+			$original = GP::$original->by_project_id_and_entry( $project->id, $entry, '+active' );
 
 			if ( ! $original ) {
 				continue;
 			}
 
-			// Check if already has a current translation.
-			$existing = GP::$translation->find_one(
-				array(
-					'original_id'        => $original->id,
-					'translation_set_id' => $translation_set->id,
-					'status'             => 'current',
-				)
-			);
-
-			if ( $existing ) {
-				continue;
+			$changed = false;
+			if ( Human_Translations::import_entry( $original, $translation_set, $entry, false, $changed ) && $changed ) {
+				++$imported;
 			}
-
-			$data = array(
-				'original_id'        => $original->id,
-				'translation_set_id' => $translation_set->id,
-				'translation_0'      => $entry->translations[0],
-				'status'             => 'current',
-				'user_id'            => 0,
-			);
-
-			if ( ! empty( $entry->translations[1] ) ) {
-				$data['translation_1'] = $entry->translations[1];
-			}
-
-			GP::$translation->create( $data );
-			++$imported;
 		}
 
 		return $imported;
@@ -811,17 +810,11 @@ class Automation {
 
 		$replaced = 0;
 		foreach ( $po->entries as $entry ) {
-			if ( empty( $entry->translations[0] ) ) {
+			if ( empty( $entry->translations ) ) {
 				continue;
 			}
 
-			$original = GP::$original->find_one(
-				array(
-					'project_id' => $project->id,
-					'singular'   => $entry->singular,
-					'status'     => '+active',
-				)
-			);
+			$original = GP::$original->by_project_id_and_entry( $project->id, $entry, '+active' );
 
 			if ( ! $original ) {
 				continue;
@@ -846,17 +839,10 @@ class Automation {
 				continue; // Human-set translation — don't overwrite.
 			}
 
-			if ( $existing->translation_0 === $entry->translations[0] ) {
-				continue; // Same translation — no need to replace.
-			}
-
-			// Replace AI translation with human translation.
-			$saved = self::save_human_translation(
-				$existing,
-				$entry->translations[0],
-				! empty( $entry->translations[1] ) ? $entry->translations[1] : null
-			);
-			if ( ! $saved ) {
+			// The shared policy handles every slot and preserves complete rows on partial imports.
+			$changed = false;
+			$saved = Human_Translations::import_entry( $original, $translation_set, $entry, true, $changed );
+			if ( ! $saved || ! $changed ) {
 				continue;
 			}
 
@@ -880,13 +866,14 @@ class Automation {
 	 * @return bool Whether GlotPress saved the translation.
 	 */
 	protected static function save_human_translation( object $existing, string $singular, ?string $plural ): bool {
-		return (bool) $existing->save(
-			array(
-				'translation_0' => $singular,
-				'translation_1' => $plural,
-				'user_id'       => 0, // Still system-imported, but from human source.
-			)
+		$fields = array(
+			'translation_0' => $singular,
+			'user_id'       => 0,
 		);
+		if ( null !== $plural && '' !== trim( $plural ) ) {
+			$fields['translation_1'] = $plural;
+		}
+		return (bool) $existing->save( $fields );
 	}
 
 	/**

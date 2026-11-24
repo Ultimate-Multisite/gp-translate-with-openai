@@ -52,7 +52,6 @@ if ( ! $saved ) {
 
 $expected = array(
 	'translation_0' => 'Human singular',
-	'translation_1' => null,
 	'user_id'       => 0,
 );
 
